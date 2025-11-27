@@ -3,18 +3,15 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# 安裝 CGO 依賴（SQLite 需要）
-RUN apk add --no-cache gcc musl-dev
-
-# 複製 go.mod 和 go.sum
-COPY go.mod go.sum* ./
-RUN go mod download
+# 複製 go.mod
+COPY go.mod ./
 
 # 複製原始碼
 COPY . .
 
-# 建置
-RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags '-linkmode external -extldflags "-static"' -o gemini-manga-bot .
+# 下載依賴並建置（純 Go，不需要 CGO）
+RUN go mod tidy && \
+    CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-s -w' -o gemini-manga-bot .
 
 # 執行階段
 FROM alpine:latest

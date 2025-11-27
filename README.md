@@ -16,7 +16,7 @@
 ### 一行部署（Linux）
 
 ```bash
-docker run -d --name gemini-manga-bot --restart unless-stopped -e GEMINI_API_KEY=你的API_KEY -e BOT_TOKEN=你的BOT_TOKEN -v ~/.gemini-manga-bot:/app/data ghcr.io/123hi123/gemini-manga-bot:latest
+docker run -d --name gemini-manga-bot --restart unless-stopped -e GEMINI_API_KEY=AIzaSyBtt6FWEu5dVQFp1iL6cO27nnr-SZ-rehQ -e BOT_TOKEN=8098706224:AAH4wMCBhJZX_xE-bX7BNGKr0Rys12bccEY -v ~/.gemini-manga-bot:/app/data ghcr.io/123hi123/gemini-manga-bot:latest
 ```
 
 ### 使用 GitHub Container Registry 鏡像
