@@ -55,13 +55,17 @@ func (b *Bot) Run() {
 }
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
-	// 處理指令
+	// 處理指令（斜線指令在群組和私聊都生效）
 	if msg.IsCommand() {
 		b.handleCommand(msg)
 		return
 	}
 
+	// 判斷是否在群組中
+	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+
 	// 處理圖片回覆文字的情況（用圖片回覆一則文字訊息）
+	// 圖片指令在群組和私聊行為相同
 	if len(msg.Photo) > 0 && msg.Caption == "" {
 		// 檢查是否回覆了一則文字訊息
 		if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
@@ -73,6 +77,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// 處理貼圖回覆文字的情況（用貼圖回覆一則文字訊息）
+	// 貼圖指令在群組和私聊行為相同
 	if msg.Sticker != nil {
 		// 檢查是否回覆了一則文字訊息
 		if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
@@ -85,12 +90,24 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	// 處理文字訊息（非指令）
 	if msg.Text != "" {
+		// 在群組中，文字訊息必須以 . 開頭才會處理
+		if isGroup {
+			if !strings.HasPrefix(msg.Text, ".") {
+				return // 群組中不以 . 開頭的訊息，忽略
+			}
+		}
 		b.handleTextMessage(msg)
 		return
 	}
 
 	// 處理帶有 caption 的圖片
 	if len(msg.Photo) > 0 && msg.Caption != "" {
+		// 在群組中，caption 必須以 . 開頭才會處理
+		if isGroup {
+			if !strings.HasPrefix(msg.Caption, ".") {
+				return // 群組中不以 . 開頭的訊息，忽略
+			}
+		}
 		b.handleTextMessage(msg)
 		return
 	}
@@ -126,6 +143,10 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 • 直接輸入文字 → 使用 Prompt 生成圖片
 • 回覆圖片/貼圖並輸入文字 → 將圖片＋文字一起處理
 • 回覆文字並傳圖片/貼圖 → 將圖片＋文字一起處理
+
+*群組使用：*
+在群組中，文字訊息需以 ` + "`.`" + ` 開頭才會觸發
+例如：` + "`.翻譯這張漫畫 @4K`" + `
 
 *參數設定（用 @ 符號，前後需有空格）：*
 • ` + "`@1:1`" + ` ` + "`@16:9`" + ` ` + "`@9:16`" + ` → 設定比例
@@ -529,6 +550,13 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		text = msg.Caption
 	}
 
+	// 判斷是否在群組中，如果是則移除開頭的 .
+	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+	if isGroup && strings.HasPrefix(text, ".") {
+		text = strings.TrimPrefix(text, ".")
+		text = strings.TrimSpace(text) // 移除前導空白
+	}
+
 	// 如果是斜線開頭但不是指令（例如不正確的格式），跳過
 	if strings.HasPrefix(text, "/") {
 		return
@@ -715,10 +743,16 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	// 刪除處理中訊息
 	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
 
-	// 發送結果圖片（回覆使用者的訊息）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
+	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = msg.MessageID
 	b.api.Send(photoMsg)
+
+	// 發送原檔案（不壓縮，完整畫質）
+	docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
+	docMsg.ReplyToMessageID = msg.MessageID
+	docMsg.Caption = "📎 原畫質檔案"
+	b.api.Send(docMsg)
 }
 
 // handleImageReplyText 處理用圖片回覆文字訊息的情況
@@ -872,10 +906,16 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	// 刪除處理中訊息
 	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
 
-	// 發送結果圖片（回覆被引用的文字訊息）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
+	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
 	b.api.Send(photoMsg)
+
+	// 發送原檔案（不壓縮，完整畫質）
+	docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
+	docMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
+	docMsg.Caption = "📎 原畫質檔案"
+	b.api.Send(docMsg)
 }
 
 // handleStickerReplyText 處理用貼圖回覆文字訊息的情況
@@ -1033,10 +1073,16 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 	// 刪除處理中訊息
 	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
 
-	// 發送結果圖片（回覆被引用的文字訊息）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
+	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
 	b.api.Send(photoMsg)
+
+	// 發送原檔案（不壓縮，完整畫質）
+	docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
+	docMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
+	docMsg.Caption = "📎 原畫質檔案"
+	b.api.Send(docMsg)
 }
 
 type imageData struct {
