@@ -62,13 +62,24 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// 處理圖片回覆文字的情況（用圖片回覆一則文字訊息）
-	if msg.Photo != nil && len(msg.Photo) > 0 && msg.Caption == "" {
+	if len(msg.Photo) > 0 && msg.Caption == "" {
 		// 檢查是否回覆了一則文字訊息
 		if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
 			b.handleImageReplyText(msg)
 			return
 		}
 		// 單獨傳圖片，不做任何處理
+		return
+	}
+
+	// 處理貼圖回覆文字的情況（用貼圖回覆一則文字訊息）
+	if msg.Sticker != nil {
+		// 檢查是否回覆了一則文字訊息
+		if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
+			b.handleStickerReplyText(msg)
+			return
+		}
+		// 單獨傳貼圖，不做任何處理
 		return
 	}
 
@@ -79,7 +90,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// 處理帶有 caption 的圖片
-	if msg.Photo != nil && len(msg.Photo) > 0 && msg.Caption != "" {
+	if len(msg.Photo) > 0 && msg.Caption != "" {
 		b.handleTextMessage(msg)
 		return
 	}
@@ -113,8 +124,8 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 
 *基本用法：*
 • 直接輸入文字 → 使用 Prompt 生成圖片
-• 回覆圖片並輸入文字 → 將圖片＋文字一起處理
-• 回覆文字並傳圖片 → 將圖片＋文字一起處理
+• 回覆圖片/貼圖並輸入文字 → 將圖片＋文字一起處理
+• 回覆文字並傳圖片/貼圖 → 將圖片＋文字一起處理
 
 *參數設定（用 @ 符號，前後需有空格）：*
 • ` + "`@1:1`" + ` ` + "`@16:9`" + ` ` + "`@9:16`" + ` → 設定比例
@@ -123,7 +134,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 *支援的比例：*
 ` + "`@1:1`" + ` ` + "`@2:3`" + ` ` + "`@3:2`" + ` ` + "`@3:4`" + ` ` + "`@4:3`" + ` ` + "`@4:5`" + ` ` + "`@5:4`" + ` ` + "`@9:16`" + ` ` + "`@16:9`" + ` ` + "`@21:9`" + `
 
-*Auto 比例：* 不指定比例時，會自動偵測圖片比例
+*Auto 比例：* 不指定比例時，由 AI 自動決定
 
 *範例：*
 ` + "`翻譯這張漫畫 @16:9 @4K`" + `
@@ -553,19 +564,29 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	var images []imageData
 
 	// 檢查當前訊息是否有圖片
-	if msg.Photo != nil && len(msg.Photo) > 0 {
+	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		images = append(images, imageData{FileID: photo.FileID})
 	}
 
-	// 檢查回覆的訊息是否有圖片
+	// 檢查回覆的訊息是否有圖片或貼圖
 	if msg.ReplyToMessage != nil {
 		replyMsg := msg.ReplyToMessage
 
 		// 回覆的訊息是圖片
-		if replyMsg.Photo != nil && len(replyMsg.Photo) > 0 {
+		if len(replyMsg.Photo) > 0 {
 			photo := replyMsg.Photo[len(replyMsg.Photo)-1]
 			images = append(images, imageData{FileID: photo.FileID})
+		}
+
+		// 回覆的訊息是貼圖
+		if replyMsg.Sticker != nil {
+			// 優先使用 PNG 縮圖，如果沒有則使用原始貼圖
+			if replyMsg.Sticker.Thumbnail != nil {
+				images = append(images, imageData{FileID: replyMsg.Sticker.Thumbnail.FileID})
+			} else {
+				images = append(images, imageData{FileID: replyMsg.Sticker.FileID})
+			}
 		}
 
 		// 回覆的訊息是文件（可能是圖片檔案）
@@ -704,45 +725,45 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	// 從被回覆的訊息取得文字
 	replyText := msg.ReplyToMessage.Text
-	
+
 	// 如果是斜線開頭，跳過
 	if strings.HasPrefix(replyText, "/") {
 		return
 	}
-	
+
 	// 解析參數（從被回覆的文字中）
 	params := parseTextParams(replyText)
-	
+
 	// 檢查參數錯誤
 	if params.RatioError != "" || params.QualityError != "" {
 		errorText := "❌ *參數錯誤*\n\n"
-		
+
 		if params.RatioError != "" {
 			errorText += fmt.Sprintf("無效的比例：`%s`\n", params.RatioError)
 			errorText += "支援的比例：`@1:1` `@2:3` `@3:2` `@3:4` `@4:3` `@4:5` `@5:4` `@9:16` `@16:9` `@21:9`\n\n"
 		}
-		
+
 		if params.QualityError != "" {
 			errorText += fmt.Sprintf("無效的畫質：`%s`\n", params.QualityError)
 			errorText += "支援的畫質：`@1K` `@2K` `@4K`\n\n"
 		}
-		
+
 		errorText += "*正確範例：*\n`翻譯這張漫畫 @16:9 @4K`"
-		
+
 		reply := tgbotapi.NewMessage(msg.Chat.ID, errorText)
 		reply.ParseMode = "Markdown"
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
 	}
-	
+
 	// 收集圖片（從當前訊息）
 	var images []imageData
 	if msg.Photo != nil && len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]
 		images = append(images, imageData{FileID: photo.FileID})
 	}
-	
+
 	// 取得預設設定
 	quality := params.Quality
 	if quality == "" {
@@ -751,9 +772,9 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 			quality = "2K"
 		}
 	}
-	
+
 	aspectRatio := params.AspectRatio
-	
+
 	// 決定使用的 Prompt
 	prompt := params.Prompt
 	if prompt == "" {
@@ -766,33 +787,33 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	} else {
 		b.db.AddToHistory(msg.From.ID, prompt)
 	}
-	
+
 	// 顯示參數資訊
 	ratioDisplay := "Auto"
 	if aspectRatio != "" {
 		ratioDisplay = aspectRatio
 	}
-	
+
 	qualityDisplay := quality
 	if params.Quality == "" {
 		qualityDisplay = quality + " (預設)"
 	}
-	
+
 	// 發送處理中訊息（回覆被引用的文字訊息）
 	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
 		ratioDisplay, qualityDisplay, len(images))
-	
+
 	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
 	if err != nil {
 		return
 	}
-	
+
 	// 下載圖片
 	var downloadedImages []gemini.DownloadedImage
 	for i, img := range images {
 		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 下載圖片 %d/%d...",
 			ratioDisplay, qualityDisplay, i+1, len(images)))
-		
+
 		fileConfig := tgbotapi.FileConfig{FileID: img.FileID}
 		file, err := b.api.GetFile(fileConfig)
 		if err != nil {
@@ -800,57 +821,218 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 				i+1, truncateError(err.Error())))
 			return
 		}
-		
+
 		data, mimeType, err := b.downloadFile(file.FilePath)
 		if err != nil {
 			b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>\n\n下載圖片 %d 失敗\n\n<blockquote expandable>%s</blockquote>",
 				i+1, truncateError(err.Error())))
 			return
 		}
-		
+
 		downloadedImages = append(downloadedImages, gemini.DownloadedImage{
 			Data:     data,
 			MimeType: mimeType,
 		})
 	}
-	
+
 	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
-	
+
 	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
 		ratioDisplay, qualityDisplay, len(images)))
-	
+
 	// 重試邏輯
 	var result *gemini.ImageResult
 	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
 	if quality == "1K" {
 		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
 	}
-	
+
 	ctx := context.Background()
 	var lastErr error
-	
+
 	for i, q := range qualities {
 		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
 			i+1, q, ratioDisplay, qualityDisplay, len(images)))
-		
+
 		result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
 		if lastErr == nil {
 			break
 		}
-		
+
 		log.Printf("Attempt %d failed: %v", i+1, lastErr)
 		time.Sleep(time.Second * 2)
 	}
-	
+
 	if lastErr != nil {
 		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
 			truncateError(lastErr.Error())))
 		return
 	}
-	
+
 	// 刪除處理中訊息
 	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
-	
+
+	// 發送結果圖片（回覆被引用的文字訊息）
+	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
+	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
+	b.api.Send(photoMsg)
+}
+
+// handleStickerReplyText 處理用貼圖回覆文字訊息的情況
+func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
+	// 從被回覆的訊息取得文字
+	replyText := msg.ReplyToMessage.Text
+
+	// 如果是斜線開頭，跳過
+	if strings.HasPrefix(replyText, "/") {
+		return
+	}
+
+	// 解析參數（從被回覆的文字中）
+	params := parseTextParams(replyText)
+
+	// 檢查參數錯誤
+	if params.RatioError != "" || params.QualityError != "" {
+		errorText := "❌ *參數錯誤*\n\n"
+
+		if params.RatioError != "" {
+			errorText += fmt.Sprintf("無效的比例：`%s`\n", params.RatioError)
+			errorText += "支援的比例：`@1:1` `@2:3` `@3:2` `@3:4` `@4:3` `@4:5` `@5:4` `@9:16` `@16:9` `@21:9`\n\n"
+		}
+
+		if params.QualityError != "" {
+			errorText += fmt.Sprintf("無效的畫質：`%s`\n", params.QualityError)
+			errorText += "支援的畫質：`@1K` `@2K` `@4K`\n\n"
+		}
+
+		errorText += "*正確範例：*\n`翻譯這張漫畫 @16:9 @4K`"
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, errorText)
+		reply.ParseMode = "Markdown"
+		reply.ReplyToMessageID = msg.MessageID
+		b.api.Send(reply)
+		return
+	}
+
+	// 收集貼圖
+	var images []imageData
+	if msg.Sticker != nil {
+		// 優先使用 PNG 縮圖，如果沒有則使用原始貼圖
+		if msg.Sticker.Thumbnail != nil {
+			images = append(images, imageData{FileID: msg.Sticker.Thumbnail.FileID})
+		} else {
+			images = append(images, imageData{FileID: msg.Sticker.FileID})
+		}
+	}
+
+	// 取得預設設定
+	quality := params.Quality
+	if quality == "" {
+		quality, _ = b.db.GetUserSettings(msg.From.ID)
+		if quality == "" {
+			quality = "2K"
+		}
+	}
+
+	aspectRatio := params.AspectRatio
+
+	// 決定使用的 Prompt
+	prompt := params.Prompt
+	if prompt == "" {
+		defaultPrompt, _ := b.db.GetDefaultPrompt(msg.From.ID)
+		if defaultPrompt != nil {
+			prompt = defaultPrompt.Prompt
+		} else {
+			prompt = config.DefaultPrompt
+		}
+	} else {
+		b.db.AddToHistory(msg.From.ID, prompt)
+	}
+
+	// 顯示參數資訊
+	ratioDisplay := "Auto"
+	if aspectRatio != "" {
+		ratioDisplay = aspectRatio
+	}
+
+	qualityDisplay := quality
+	if params.Quality == "" {
+		qualityDisplay = quality + " (預設)"
+	}
+
+	// 發送處理中訊息（回覆被引用的文字訊息）
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		ratioDisplay, qualityDisplay, len(images))
+
+	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
+	if err != nil {
+		return
+	}
+
+	// 下載貼圖
+	var downloadedImages []gemini.DownloadedImage
+	for i, img := range images {
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 下載貼圖 %d/%d...",
+			ratioDisplay, qualityDisplay, i+1, len(images)))
+
+		fileConfig := tgbotapi.FileConfig{FileID: img.FileID}
+		file, err := b.api.GetFile(fileConfig)
+		if err != nil {
+			b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>\n\n無法取得貼圖 %d\n\n<blockquote expandable>%s</blockquote>",
+				i+1, truncateError(err.Error())))
+			return
+		}
+
+		data, mimeType, err := b.downloadFile(file.FilePath)
+		if err != nil {
+			b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>\n\n下載貼圖 %d 失敗\n\n<blockquote expandable>%s</blockquote>",
+				i+1, truncateError(err.Error())))
+			return
+		}
+
+		downloadedImages = append(downloadedImages, gemini.DownloadedImage{
+			Data:     data,
+			MimeType: mimeType,
+		})
+	}
+
+	// 不再自動偵測比例，完全讓 Gemini API 決定（除非使用者有指定）
+
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		ratioDisplay, qualityDisplay, len(images)))
+
+	// 重試邏輯
+	var result *gemini.ImageResult
+	qualities := []string{quality, quality, quality, "1K", "1K", "1K"}
+	if quality == "1K" {
+		qualities = []string{"1K", "1K", "1K", "1K", "1K", "1K"}
+	}
+
+	ctx := context.Background()
+	var lastErr error
+
+	for i, q := range qualities {
+		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (嘗試 %d/6，畫質 %s)\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+			i+1, q, ratioDisplay, qualityDisplay, len(images)))
+
+		result, lastErr = b.gemini.GenerateImageWithContext(ctx, downloadedImages, prompt, q, aspectRatio)
+		if lastErr == nil {
+			break
+		}
+
+		log.Printf("Attempt %d failed: %v", i+1, lastErr)
+		time.Sleep(time.Second * 2)
+	}
+
+	if lastErr != nil {
+		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（已重試 6 次）\n\n<blockquote expandable>%s</blockquote>",
+			truncateError(lastErr.Error())))
+		return
+	}
+
+	// 刪除處理中訊息
+	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
+
 	// 發送結果圖片（回覆被引用的文字訊息）
 	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "generated.png", Bytes: result.ImageData})
 	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
