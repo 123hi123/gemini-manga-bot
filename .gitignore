@@ -6,6 +6,8 @@
 *.dylib
 gemini-manga-bot
 
+
+
 # 測試
 *.test
 *.out
@@ -35,3 +37,4 @@ data/
 Thumbs.db
 # person see file
 README copy.md
+todo

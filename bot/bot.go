@@ -102,6 +102,8 @@ func (b *Bot) cacheMediaGroupImage(mediaGroupID string, fileID string) {
 		FileID:    fileID,
 		Timestamp: time.Now(),
 	})
+	log.Printf("[MediaGroup] 快取圖片: GroupID=%s, FileID=%s, 目前數量=%d",
+		mediaGroupID, fileID[:20]+"...", len(b.mediaGroups.groups[mediaGroupID]))
 }
 
 // getMediaGroupImages 取得 Media Group 中所有圖片的 FileID
@@ -114,6 +116,7 @@ func (b *Bot) getMediaGroupImages(mediaGroupID string) []string {
 	for i, img := range images {
 		fileIDs[i] = img.FileID
 	}
+	log.Printf("[MediaGroup] 取得圖片: GroupID=%s, 數量=%d", mediaGroupID, len(fileIDs))
 	return fileIDs
 }
 
@@ -131,6 +134,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if len(msg.Photo) > 0 && msg.MediaGroupID != "" {
 		photo := msg.Photo[len(msg.Photo)-1]
 		b.cacheMediaGroupImage(msg.MediaGroupID, photo.FileID)
+		log.Printf("[收到圖片] MediaGroupID=%s, MessageID=%d", msg.MediaGroupID, msg.MessageID)
+	} else if len(msg.Photo) > 0 {
+		log.Printf("[收到圖片] 單張圖片（無 MediaGroupID）, MessageID=%d", msg.MessageID)
 	}
 
 	// 處理圖片回覆文字的情況（用圖片回覆一則文字訊息）
@@ -673,20 +679,27 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		// 回覆的訊息是圖片
 		if len(replyMsg.Photo) > 0 {
 			// 檢查是否屬於 Media Group
+			log.Printf("[回覆圖片] ReplyToMessage MediaGroupID='%s', MessageID=%d", replyMsg.MediaGroupID, replyMsg.MessageID)
 			if replyMsg.MediaGroupID != "" {
+				// 等待一小段時間讓所有圖片都被快取（Telegram 會分批發送 Media Group）
+				time.Sleep(500 * time.Millisecond)
+				
 				// 從快取中取得該 Media Group 的所有圖片
 				groupImages := b.getMediaGroupImages(replyMsg.MediaGroupID)
+				log.Printf("[回覆圖片] 從快取取得 %d 張圖片", len(groupImages))
 				if len(groupImages) > 0 {
 					for _, fileID := range groupImages {
 						images = append(images, imageData{FileID: fileID})
 					}
 				} else {
 					// 快取中沒有，使用回覆訊息中的圖片
+					log.Printf("[回覆圖片] 快取為空，使用單張圖片（圖片可能是在 Bot 啟動前上傳的）")
 					photo := replyMsg.Photo[len(replyMsg.Photo)-1]
 					images = append(images, imageData{FileID: photo.FileID})
 				}
 			} else {
 				// 單張圖片
+				log.Printf("[回覆圖片] 單張圖片（無 MediaGroupID）")
 				photo := replyMsg.Photo[len(replyMsg.Photo)-1]
 				images = append(images, imageData{FileID: photo.FileID})
 			}
