@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"gemini-manga-bot/config"
@@ -16,11 +17,23 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+// mediaGroupCache 用於快取 Media Group 的圖片
+type mediaGroupCache struct {
+	sync.RWMutex
+	groups map[string][]cachedImage // key: MediaGroupID
+}
+
+type cachedImage struct {
+	FileID    string
+	Timestamp time.Time
+}
+
 type Bot struct {
-	api    *tgbotapi.BotAPI
-	gemini *gemini.Client
-	db     *database.Database
-	config *config.Config
+	api         *tgbotapi.BotAPI
+	gemini      *gemini.Client
+	db          *database.Database
+	config      *config.Config
+	mediaGroups *mediaGroupCache
 }
 
 func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
@@ -31,12 +44,20 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 
 	log.Printf("Bot authorized on account %s", api.Self.UserName)
 
-	return &Bot{
+	bot := &Bot{
 		api:    api,
 		gemini: gemini.NewClient(cfg.GeminiAPIKey),
 		db:     db,
 		config: cfg,
-	}, nil
+		mediaGroups: &mediaGroupCache{
+			groups: make(map[string][]cachedImage),
+		},
+	}
+
+	// 啟動清理過期快取的 goroutine
+	go bot.cleanupMediaGroupCache()
+
+	return bot, nil
 }
 
 func (b *Bot) Run() {
@@ -54,6 +75,48 @@ func (b *Bot) Run() {
 	}
 }
 
+// cleanupMediaGroupCache 定期清理過期的 Media Group 快取
+func (b *Bot) cleanupMediaGroupCache() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		b.mediaGroups.Lock()
+		now := time.Now()
+		for groupID, images := range b.mediaGroups.groups {
+			// 檢查第一張圖片的時間（最早的）
+			if len(images) > 0 && now.Sub(images[0].Timestamp) > 10*time.Minute {
+				delete(b.mediaGroups.groups, groupID)
+			}
+		}
+		b.mediaGroups.Unlock()
+	}
+}
+
+// cacheMediaGroupImage 快取 Media Group 中的圖片
+func (b *Bot) cacheMediaGroupImage(mediaGroupID string, fileID string) {
+	b.mediaGroups.Lock()
+	defer b.mediaGroups.Unlock()
+
+	b.mediaGroups.groups[mediaGroupID] = append(b.mediaGroups.groups[mediaGroupID], cachedImage{
+		FileID:    fileID,
+		Timestamp: time.Now(),
+	})
+}
+
+// getMediaGroupImages 取得 Media Group 中所有圖片的 FileID
+func (b *Bot) getMediaGroupImages(mediaGroupID string) []string {
+	b.mediaGroups.RLock()
+	defer b.mediaGroups.RUnlock()
+
+	images := b.mediaGroups.groups[mediaGroupID]
+	fileIDs := make([]string, len(images))
+	for i, img := range images {
+		fileIDs[i] = img.FileID
+	}
+	return fileIDs
+}
+
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	// 處理指令（斜線指令在群組和私聊都生效）
 	if msg.IsCommand() {
@@ -63,6 +126,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	// 判斷是否在群組中
 	isGroup := msg.Chat.Type == "group" || msg.Chat.Type == "supergroup"
+
+	// 快取 Media Group 中的圖片
+	if len(msg.Photo) > 0 && msg.MediaGroupID != "" {
+		photo := msg.Photo[len(msg.Photo)-1]
+		b.cacheMediaGroupImage(msg.MediaGroupID, photo.FileID)
+	}
 
 	// 處理圖片回覆文字的情況（用圖片回覆一則文字訊息）
 	// 圖片指令在群組和私聊行為相同
@@ -603,8 +672,24 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 
 		// 回覆的訊息是圖片
 		if len(replyMsg.Photo) > 0 {
-			photo := replyMsg.Photo[len(replyMsg.Photo)-1]
-			images = append(images, imageData{FileID: photo.FileID})
+			// 檢查是否屬於 Media Group
+			if replyMsg.MediaGroupID != "" {
+				// 從快取中取得該 Media Group 的所有圖片
+				groupImages := b.getMediaGroupImages(replyMsg.MediaGroupID)
+				if len(groupImages) > 0 {
+					for _, fileID := range groupImages {
+						images = append(images, imageData{FileID: fileID})
+					}
+				} else {
+					// 快取中沒有，使用回覆訊息中的圖片
+					photo := replyMsg.Photo[len(replyMsg.Photo)-1]
+					images = append(images, imageData{FileID: photo.FileID})
+				}
+			} else {
+				// 單張圖片
+				photo := replyMsg.Photo[len(replyMsg.Photo)-1]
+				images = append(images, imageData{FileID: photo.FileID})
+			}
 		}
 
 		// 回覆的訊息是貼圖
@@ -793,9 +878,25 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 
 	// 收集圖片（從當前訊息）
 	var images []imageData
-	if msg.Photo != nil && len(msg.Photo) > 0 {
-		photo := msg.Photo[len(msg.Photo)-1]
-		images = append(images, imageData{FileID: photo.FileID})
+	if len(msg.Photo) > 0 {
+		// 檢查是否屬於 Media Group
+		if msg.MediaGroupID != "" {
+			// 從快取中取得該 Media Group 的所有圖片
+			groupImages := b.getMediaGroupImages(msg.MediaGroupID)
+			if len(groupImages) > 0 {
+				for _, fileID := range groupImages {
+					images = append(images, imageData{FileID: fileID})
+				}
+			} else {
+				// 快取中沒有，使用當前訊息中的圖片
+				photo := msg.Photo[len(msg.Photo)-1]
+				images = append(images, imageData{FileID: photo.FileID})
+			}
+		} else {
+			// 單張圖片
+			photo := msg.Photo[len(msg.Photo)-1]
+			images = append(images, imageData{FileID: photo.FileID})
+		}
 	}
 
 	// 取得預設設定
