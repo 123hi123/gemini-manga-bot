@@ -78,6 +78,34 @@ docker run -d \
 | 回覆文字 + 傳圖片 | 同上，另一種操作方式 |
 | 上傳多張圖 + 回覆其一 | AI 會抓取所有圖片一起處理 |
 
+### 使用範例
+
+#### 1️⃣ 純文字生成圖片
+
+直接輸入文字描述，AI 會幫你生成圖片：
+
+![純文字生成](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206151826189.png)
+
+#### 2️⃣ 多圖處理
+
+上傳多張圖片（確保是 Media Group），然後回覆其中任一張：
+
+![上傳多圖](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206151923134.png)
+
+Bot 會自動抓取整個 Group 的所有圖片一起處理：
+
+![回覆多圖](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152036722.png)
+
+#### 3️⃣ 用圖片/貼圖回覆文字
+
+先發送文字描述，然後用圖片或貼圖回覆（Telegram 貼圖也可以當作圖片素材）：
+
+![圖片回覆文字](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152215758.png)
+
+生成結果：
+
+![生成結果](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152257926.png)
+
 ### 參數設定
 
 在文字中使用 @ 符號設定參數（前後需有空格）：

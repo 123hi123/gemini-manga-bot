@@ -1,7 +1,23 @@
-# 支持多圖 輸入 (上傳圖片要在機器人啟動後)
+# 使用方式
 
-![image-20251205100907919](C:\Users\joego\AppData\Roaming\Typora\typora-user-images\image-20251205100907919.png)
+# 單文字
 
-成果
+![image-20251206151826189](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206151826189.png)
 
-![image-20251205101209412](C:\Users\joego\AppData\Roaming\Typora\typora-user-images\image-20251205101209412.png)
+# 上傳多圖 然後用文字回復他
+
+確保是group media
+
+![image-20251206151923134](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206151923134.png)
+
+然後 隨便回復group當中的一個圖片 會傳入整個group的圖片
+
+![image-20251206152036722](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152036722.png)
+
+# 用圖片回復文字 (順帶一提 tg的貼圖也是可以作為圖片傳入的
+
+![image-20251206152215758](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152215758.png)
+
+outcome
+
+![image-20251206152257926](https://cdn.jsdelivr.net/gh/321hi123/typoraimgbed/img/image-20251206152257926.png)
