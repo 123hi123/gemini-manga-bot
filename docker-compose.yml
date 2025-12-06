@@ -1,7 +1,7 @@
 services:
-  gemini-manga-bot:
+  tg-bawer:
     build: .
-    container_name: gemini-manga-bot
+    container_name: tg-bawer
     restart: unless-stopped
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}

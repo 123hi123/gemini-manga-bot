@@ -1,6 +1,8 @@
-# Gemini 漫畫翻譯 Telegram Bot
+# TG-Bawer 🍌✏️
 
-使用 Gemini 3 Pro Image Preview 自動翻譯漫畫圖片的 Telegram Bot。
+Telegram Bot powered by Gemini - 用 AI 畫你想要的圖！
+
+> **Bawer** = **Ba**nana + Dra**wer** 🎨
 
 ## 功能
 
@@ -16,19 +18,19 @@
 ### 一行部署（Linux）
 
 ```bash
-docker run -d --name gemini-manga-bot --restart unless-stopped -e GEMINI_API_KEY=你的API_KEY -e BOT_TOKEN=你的BOT_TOKEN -v ~/.gemini-manga-bot:/app/data ghcr.io/123hi123/gemini-manga-bot:latest
+docker run -d --name tg-bawer --restart unless-stopped -e GEMINI_API_KEY=你的API_KEY -e BOT_TOKEN=你的BOT_TOKEN -v ~/.tg-bawer:/app/data ghcr.io/123hi123/tg-bawer:latest
 ```
 
 ### 使用 GitHub Container Registry 鏡像
 
 ```bash
 docker run -d \
-  --name gemini-manga-bot \
+  --name tg-bawer \
   --restart unless-stopped \
   -e GEMINI_API_KEY=your_key \
   -e BOT_TOKEN=your_token \
-  -v ~/.gemini-manga-bot:/app/data \
-  ghcr.io/123hi123/gemini-manga-bot:latest
+  -v ~/.tg-bawer:/app/data \
+  ghcr.io/123hi123/tg-bawer:latest
 ```
 
 ### 使用 Docker Compose（推薦）
@@ -52,13 +54,13 @@ docker run -d \
 ### 使用 Docker
 
 ```bash
-docker build -t gemini-manga-bot .
+docker build -t tg-bawer .
 docker run -d \
-  --name gemini-manga-bot \
+  --name tg-bawer \
   -e GEMINI_API_KEY=your_key \
   -e BOT_TOKEN=your_token \
   -v $(pwd)/data:/app/data \
-  gemini-manga-bot
+  tg-bawer
 ```
 
 ### 本地執行
@@ -112,7 +114,7 @@ go run .
 ## 專案結構
 
 ```
-gemini-manga-bot/
+tg-bawer/
 ├── main.go              # 程式入口
 ├── bot/
 │   └── bot.go           # Telegram Bot 處理邏輯

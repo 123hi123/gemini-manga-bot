@@ -3,9 +3,9 @@ package main
 import (
 	"log"
 
-	"gemini-manga-bot/bot"
-	"gemini-manga-bot/config"
-	"gemini-manga-bot/database"
+	"tg-bawer/bot"
+	"tg-bawer/config"
+	"tg-bawer/database"
 )
 
 func main() {

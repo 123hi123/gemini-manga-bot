@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"gemini-manga-bot/config"
-	"gemini-manga-bot/database"
-	"gemini-manga-bot/gemini"
+	"tg-bawer/config"
+	"tg-bawer/database"
+	"tg-bawer/gemini"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -683,7 +683,7 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 			if replyMsg.MediaGroupID != "" {
 				// 等待一小段時間讓所有圖片都被快取（Telegram 會分批發送 Media Group）
 				time.Sleep(500 * time.Millisecond)
-				
+
 				// 從快取中取得該 Media Group 的所有圖片
 				groupImages := b.getMediaGroupImages(replyMsg.MediaGroupID)
 				log.Printf("[回覆圖片] 從快取取得 %d 張圖片", len(groupImages))

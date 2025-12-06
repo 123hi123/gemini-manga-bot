@@ -1,4 +1,4 @@
-module gemini-manga-bot
+module tg-bawer
 
 go 1.22
 
