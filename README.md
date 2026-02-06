@@ -164,6 +164,7 @@ Bot 會自動抓取整個 Group 的所有圖片一起處理：
 # 三種手動新增方式
 /service add standard <名稱> <API_KEY>
 /service add custom <名稱> <BASE_URL> <API_KEY>
+/service add vertex <名稱> <API_KEY>
 /service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]
 
 # 切換 / 刪除

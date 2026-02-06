@@ -56,13 +56,17 @@ func TestBuildGenerateURL_Vertex(t *testing.T) {
 	}
 }
 
-func TestBuildGenerateURL_VertexMissingFields(t *testing.T) {
+func TestBuildGenerateURL_VertexExpressMode(t *testing.T) {
 	client := NewClientWithService(ServiceConfig{
 		Type:   ServiceTypeVertex,
 		APIKey: "abc123",
 	})
 
-	if _, err := client.buildGenerateURL(DefaultImageModel); err == nil {
-		t.Fatalf("expected error when vertex project/location missing")
+	url, err := client.buildGenerateURL(DefaultImageModel)
+	if err != nil {
+		t.Fatalf("buildGenerateURL vertex express failed: %v", err)
+	}
+	if !strings.Contains(url, "aiplatform.googleapis.com/v1/publishers/google/models/") {
+		t.Fatalf("expected vertex express endpoint, got: %s", url)
 	}
 }

@@ -41,7 +41,7 @@ func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 你可以新增三種服務來源：
 1) ` + "`standard`" + `：只填 API Key（官方 Gemini）
 2) ` + "`custom`" + `：自訂 Base URL + API Key
-3) ` + "`vertex`" + `：Vertex（API Key + project + location）
+	3) ` + "`vertex`" + `：Vertex（支援只填 API Key 的 express mode）
 
 *指令格式：*
 ` + "`/service list`" + `
@@ -50,12 +50,14 @@ func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 
 ` + "`/service add standard <名稱> <API_KEY>`" + `
 ` + "`/service add custom <名稱> <BASE_URL> <API_KEY>`" + `
-` + "`/service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]`" + `
+	` + "`/service add vertex <名稱> <API_KEY>`" + `  (express mode)
+	` + "`/service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]`" + `  (full mode)
 
 *範例：*
 ` + "`/service add standard my-gemini AIza...`" + `
 ` + "`/service add custom my-proxy https://your-proxy.example.com AIza...`" + `
-` + "`/service add vertex my-vertex AIza... my-project asia-east1 gemini-3-pro-image-preview`"
+	` + "`/service add vertex my-vertex AIza...`" + `
+	` + "`/service add vertex my-vertex AIza... my-project asia-east1 gemini-3-pro-image-preview`"
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, helpText)
 	reply.ParseMode = "Markdown"
@@ -92,7 +94,11 @@ func (b *Bot) sendServiceList(msg *tgbotapi.Message) {
 		}
 
 		if service.Type == gemini.ServiceTypeVertex {
-			detail += fmt.Sprintf(" project=%s location=%s", service.ProjectID, service.Location)
+			if service.ProjectID != "" && service.Location != "" {
+				detail += fmt.Sprintf(" project=%s location=%s", service.ProjectID, service.Location)
+			} else {
+				detail += " mode=express"
+			}
 			if service.Model != "" {
 				detail += " model=" + service.Model
 			}
@@ -175,16 +181,26 @@ func (b *Bot) cmdServiceAdd(msg *tgbotapi.Message, args []string) {
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已新增 custom 服務 #%d，並設為預設", id)))
 
 	case "vertex":
-		if len(args) < 6 {
-			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 格式：/service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]"))
+		// 支援兩種格式：
+		// 1) express mode: /service add vertex <名稱> <API_KEY>
+		// 2) full mode:    /service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]
+		if len(args) < 4 {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 格式：/service add vertex <名稱> <API_KEY> 或 /service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]"))
 			return
 		}
 
+		projectID := ""
+		location := ""
 		model := ""
+		baseURL := ""
+
+		if len(args) >= 6 {
+			projectID = args[4]
+			location = args[5]
+		}
 		if len(args) >= 7 {
 			model = args[6]
 		}
-		baseURL := ""
 		if len(args) >= 8 {
 			baseURL = args[7]
 		}
@@ -195,8 +211,8 @@ func (b *Bot) cmdServiceAdd(msg *tgbotapi.Message, args []string) {
 			args[2],
 			args[3],
 			baseURL,
-			args[4],
-			args[5],
+			projectID,
+			location,
 			model,
 			true,
 		)

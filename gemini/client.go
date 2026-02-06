@@ -185,6 +185,7 @@ func (c *Client) GenerateImage(ctx context.Context, imageData []byte, mimeType, 
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
+				"role": "user",
 				"parts": []map[string]interface{}{
 					{"text": prompt},
 					{
@@ -315,6 +316,7 @@ func (c *Client) GenerateImageWithContext(ctx context.Context, images []Download
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
+				"role":  "user",
 				"parts": parts,
 			},
 		},
@@ -348,6 +350,7 @@ func (c *Client) GenerateImageFromText(ctx context.Context, prompt, quality, asp
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
+				"role": "user",
 				"parts": []map[string]interface{}{
 					{"text": prompt},
 				},
@@ -446,6 +449,7 @@ func (c *Client) ExtractText(ctx context.Context, imageData []byte, mimeType, pr
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
+				"role": "user",
 				"parts": []map[string]interface{}{
 					{"text": prompt},
 					{
@@ -527,6 +531,7 @@ func (c *Client) GenerateTTS(ctx context.Context, text, voiceName string) (*TTSR
 	requestBody := map[string]interface{}{
 		"contents": []map[string]interface{}{
 			{
+				"role": "user",
 				"parts": []map[string]interface{}{
 					{"text": fmt.Sprintf("请用自然的语气朗读以下漫画对话内容：\n\n%s", text)},
 				},
@@ -645,16 +650,25 @@ func (c *Client) buildGenerateURL(model string) (string, error) {
 	}
 
 	if serviceType == ServiceTypeVertex {
-		if baseURL == "" {
-			baseURL = DefaultVertexBaseURL
-		}
-
 		projectID := strings.TrimSpace(c.projectID)
 		location := strings.TrimSpace(c.location)
+		// Vertex Express Mode：只需 API Key（不需 project/location）
 		if projectID == "" || location == "" {
-			return "", fmt.Errorf("vertex 服務缺少 project_id 或 location")
+			if baseURL == "" {
+				baseURL = DefaultVertexBaseURL
+			}
+			endpoint := fmt.Sprintf(
+				"%s/v1/publishers/google/models/%s:generateContent",
+				strings.TrimRight(baseURL, "/"),
+				url.PathEscape(model),
+			)
+			return appendAPIKey(endpoint, c.apiKey)
 		}
 
+		// Vertex Full Mode：project/location
+		if baseURL == "" {
+			baseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com", location)
+		}
 		endpoint := fmt.Sprintf(
 			"%s/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent",
 			strings.TrimRight(baseURL, "/"),
