@@ -49,6 +49,7 @@ type FailedGeneration struct {
 	ChatID           int64
 	ReplyToMessageID int64
 	Payload          string
+	Source           string
 	LastError        string
 	RetryCount       int
 	CreatedAt        time.Time
@@ -147,13 +148,40 @@ func (d *Database) init() error {
 			chat_id INTEGER NOT NULL,
 			reply_to_message_id INTEGER DEFAULT 0,
 			payload TEXT NOT NULL,
+			source TEXT DEFAULT 'google',
 			last_error TEXT,
 			retry_count INTEGER DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			last_retry_at DATETIME
 		)
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add source column to existing tables (ignore error if already exists)
+	d.db.Exec(`ALTER TABLE failed_generations ADD COLUMN source TEXT DEFAULT 'google'`)
+
+	// 建立使用者圖片佇列表
+	_, err = d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_image_queue (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			chat_id INTEGER NOT NULL,
+			file_id TEXT NOT NULL,
+			local_path TEXT DEFAULT '',
+			ref_count INTEGER DEFAULT 1,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Create index on user_image_queue for efficient per-user lookups
+	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_image_queue_user ON user_image_queue(user_id, chat_id)`)
+
+	return nil
 }
 
 // SavePrompt 保存指定的 Prompt
@@ -471,18 +499,21 @@ func (d *Database) DeleteUserService(userID int64, serviceID int64) error {
 	return tx.Commit()
 }
 
-func (d *Database) AddFailedGeneration(userID, chatID, replyToMessageID int64, payload, lastError string) error {
+func (d *Database) AddFailedGeneration(userID, chatID, replyToMessageID int64, payload, lastError, source string) error {
+	if source == "" {
+		source = "google"
+	}
 	_, err := d.db.Exec(`
 		INSERT INTO failed_generations (
-			user_id, chat_id, reply_to_message_id, payload, last_error, retry_count, created_at
-		) VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-	`, userID, chatID, replyToMessageID, payload, lastError)
+			user_id, chat_id, reply_to_message_id, payload, source, last_error, retry_count, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+	`, userID, chatID, replyToMessageID, payload, source, lastError)
 	return err
 }
 
 func (d *Database) GetRandomFailedGeneration() (*FailedGeneration, error) {
 	row := d.db.QueryRow(`
-		SELECT id, user_id, chat_id, reply_to_message_id, payload, last_error, retry_count, created_at, last_retry_at
+		SELECT id, user_id, chat_id, reply_to_message_id, payload, COALESCE(source, 'google'), last_error, retry_count, created_at, last_retry_at
 		FROM failed_generations
 		ORDER BY RANDOM()
 		LIMIT 1
@@ -496,6 +527,7 @@ func (d *Database) GetRandomFailedGeneration() (*FailedGeneration, error) {
 		&failed.ChatID,
 		&failed.ReplyToMessageID,
 		&failed.Payload,
+		&failed.Source,
 		&failed.LastError,
 		&failed.RetryCount,
 		&failed.CreatedAt,
@@ -532,4 +564,96 @@ func (d *Database) DeleteFailedGeneration(id int64) error {
 
 func (d *Database) Close() error {
 	return d.db.Close()
+}
+
+// AddImageToQueue adds an image to a user's image queue.
+// If the same file_id already exists for any user/chat, increment ref_count.
+func (d *Database) AddImageToQueue(userID, chatID int64, fileID, localPath string) error {
+	// Check if same file already exists for this user+chat
+	var existing int64
+	err := d.db.QueryRow(`
+		SELECT id FROM user_image_queue WHERE user_id = ? AND chat_id = ? AND file_id = ?
+	`, userID, chatID, fileID).Scan(&existing)
+	if err == nil {
+		// Already exists, increment ref_count
+		_, err = d.db.Exec(`UPDATE user_image_queue SET ref_count = ref_count + 1 WHERE id = ?`, existing)
+		return err
+	}
+	_, err = d.db.Exec(`
+		INSERT INTO user_image_queue (user_id, chat_id, file_id, local_path, ref_count, created_at)
+		VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+	`, userID, chatID, fileID, localPath)
+	return err
+}
+
+// GetUserImageQueue returns the image queue for a user in a specific chat, ordered by creation time.
+func (d *Database) GetUserImageQueue(userID, chatID int64) ([]UserImageQueueItem, error) {
+	rows, err := d.db.Query(`
+		SELECT id, user_id, chat_id, file_id, local_path, ref_count, created_at
+		FROM user_image_queue
+		WHERE user_id = ? AND chat_id = ?
+		ORDER BY created_at ASC
+	`, userID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []UserImageQueueItem
+	for rows.Next() {
+		var item UserImageQueueItem
+		if err := rows.Scan(&item.ID, &item.UserID, &item.ChatID, &item.FileID, &item.LocalPath, &item.RefCount, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// ClearUserImageQueue clears the image queue for a user in a specific chat.
+// Decrements ref_count; deletes entries with ref_count <= 0.
+func (d *Database) ClearUserImageQueue(userID, chatID int64) error {
+	_, err := d.db.Exec(`
+		UPDATE user_image_queue SET ref_count = ref_count - 1
+		WHERE user_id = ? AND chat_id = ?
+	`, userID, chatID)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`DELETE FROM user_image_queue WHERE ref_count <= 0`)
+	return err
+}
+
+// CleanExpiredImageQueue removes image queue entries older than the given duration.
+func (d *Database) CleanExpiredImageQueue(maxAge time.Duration) error {
+	cutoff := time.Now().Add(-maxAge)
+	_, err := d.db.Exec(`DELETE FROM user_image_queue WHERE created_at < ?`, cutoff)
+	return err
+}
+
+// DecrementImageRefCount decrements the ref_count of a specific image queue entry.
+// Deletes the entry if ref_count reaches zero.
+func (d *Database) DecrementImageRefCount(id int64) error {
+	_, err := d.db.Exec(`UPDATE user_image_queue SET ref_count = ref_count - 1 WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`DELETE FROM user_image_queue WHERE id = ? AND ref_count <= 0`, id)
+	return err
+}
+
+// GetAllUserServices returns all services for a user (for rotation).
+func (d *Database) GetAllUserServices(userID int64) ([]UserService, error) {
+	return d.GetUserServices(userID)
+}
+
+// UserImageQueueItem represents an entry in the user's image queue.
+type UserImageQueueItem struct {
+	ID        int64
+	UserID    int64
+	ChatID    int64
+	FileID    string
+	LocalPath string
+	RefCount  int
+	CreatedAt time.Time
 }

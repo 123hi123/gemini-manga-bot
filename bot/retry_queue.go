@@ -9,6 +9,7 @@ import (
 
 	"tg-bawer/database"
 	"tg-bawer/gemini"
+	"tg-bawer/grok"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -28,7 +29,7 @@ func buildRetryQualities(quality string) []string {
 	return []string{quality, quality, quality, quality, quality, quality}
 }
 
-func (b *Bot) enqueueFailedGeneration(msg *tgbotapi.Message, replyToMessageID int, payload failedGenerationPayload, lastErr error) {
+func (b *Bot) enqueueFailedGeneration(msg *tgbotapi.Message, replyToMessageID int, payload failedGenerationPayload, lastErr error, source string) {
 	if msg == nil || msg.From == nil {
 		return
 	}
@@ -44,7 +45,11 @@ func (b *Bot) enqueueFailedGeneration(msg *tgbotapi.Message, replyToMessageID in
 		lastError = truncateError(lastErr.Error())
 	}
 
-	if err := b.db.AddFailedGeneration(msg.From.ID, msg.Chat.ID, int64(replyToMessageID), string(rawPayload), lastError); err != nil {
+	if source == "" {
+		source = "google"
+	}
+
+	if err := b.db.AddFailedGeneration(msg.From.ID, msg.Chat.ID, int64(replyToMessageID), string(rawPayload), lastError, source); err != nil {
 		log.Printf("寫入失敗任務失敗: %v", err)
 	}
 }
@@ -75,17 +80,6 @@ func (b *Bot) retryOneFailedGeneration() {
 		return
 	}
 
-	service := payload.Service
-	if service.APIKey == "" {
-		resolved, _, resolveErr := b.resolveServiceConfig(task.UserID)
-		if resolveErr != nil {
-			b.db.MarkFailedGenerationRetry(task.ID, resolveErr.Error())
-			return
-		}
-		service = resolved
-	}
-
-	client := gemini.NewClientWithService(service)
 	downloadedImages, err := b.downloadImagesByFileIDs(payload.ImageFileIDs)
 	if err != nil {
 		b.db.MarkFailedGenerationRetry(task.ID, err.Error())
@@ -98,13 +92,82 @@ func (b *Bot) retryOneFailedGeneration() {
 	aspectRatio := resolveAspectRatio(payload.AspectRatio, downloadedImages)
 
 	var result *gemini.ImageResult
-	if len(downloadedImages) > 0 {
-		result, err = client.GenerateImageWithContext(ctx, downloadedImages, payload.Prompt, payload.Quality, aspectRatio)
-	} else {
-		result, err = client.GenerateImageFromText(ctx, payload.Prompt, payload.Quality, aspectRatio)
+
+	source := task.Source
+	if source == "" {
+		source = "google"
 	}
-	if err != nil {
-		b.db.MarkFailedGenerationRetry(task.ID, err.Error())
+
+	if source == "grok" && b.grokClient.Available() {
+		// Grok retry
+		for attempt := 0; attempt < 6; attempt++ {
+			var grokResult *grok.ImageResult
+			if len(downloadedImages) > 0 {
+				grokResult, err = b.grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
+			} else {
+				grokResult, err = b.grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
+			}
+			if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
+				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
+				break
+			}
+			log.Printf("Grok retry attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
+			time.Sleep(time.Second * 2)
+		}
+	} else {
+		// Google retry: try all user services
+		allServices, _ := b.resolveAllServiceConfigs(task.UserID)
+		if len(allServices) == 0 {
+			// Fallback to payload service
+			if payload.Service.APIKey != "" {
+				allServices = append(allServices, payload.Service)
+			}
+		}
+
+		for _, svcCfg := range allServices {
+			client := gemini.NewClientWithService(svcCfg)
+			for attempt := 0; attempt < 6; attempt++ {
+				if len(downloadedImages) > 0 {
+					result, err = client.GenerateImageWithContext(ctx, downloadedImages, payload.Prompt, payload.Quality, aspectRatio)
+				} else {
+					result, err = client.GenerateImageFromText(ctx, payload.Prompt, payload.Quality, aspectRatio)
+				}
+				if err == nil && result != nil && len(result.ImageData) > 0 {
+					break
+				}
+				log.Printf("Google retry service %s attempt %d failed (id=%d): %v", svcCfg.Name, attempt+1, task.ID, err)
+				time.Sleep(time.Second * 2)
+			}
+			if result != nil && len(result.ImageData) > 0 {
+				break
+			}
+		}
+
+		// If Google fails, try Grok as fallback
+		if (result == nil || len(result.ImageData) == 0) && b.grokClient.Available() {
+			for attempt := 0; attempt < 6; attempt++ {
+				var grokResult *grok.ImageResult
+				if len(downloadedImages) > 0 {
+					grokResult, err = b.grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
+				} else {
+					grokResult, err = b.grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
+				}
+				if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
+					result = &gemini.ImageResult{ImageData: grokResult.ImageData}
+					break
+				}
+				log.Printf("Grok retry fallback attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
+				time.Sleep(time.Second * 2)
+			}
+		}
+	}
+
+	if result == nil || len(result.ImageData) == 0 {
+		errMsg := "unknown error"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
 		log.Printf("定時重試失敗 (id=%d): %v", task.ID, err)
 		return
 	}
@@ -147,7 +210,7 @@ func (b *Bot) downloadImagesByFileIDs(fileIDs []string) ([]gemini.DownloadedImag
 }
 
 func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload failedGenerationPayload, result *gemini.ImageResult) error {
-	if result == nil {
+	if result == nil || len(result.ImageData) == 0 {
 		return fmt.Errorf("empty retry result")
 	}
 
@@ -163,8 +226,13 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if task.ReplyToMessageID > 0 {
 		photoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	if _, err := b.api.Send(photoMsg); err != nil {
-		return err
+	sentPhoto, err := b.api.Send(photoMsg)
+	if err != nil {
+		return fmt.Errorf("發送預覽圖失敗: %w", err)
+	}
+	// Verify the photo was actually uploaded
+	if len(sentPhoto.Photo) == 0 {
+		return fmt.Errorf("預覽圖上傳失敗：未收到確認")
 	}
 
 	filename := "retry_generated.png"
@@ -176,8 +244,13 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if task.ReplyToMessageID > 0 {
 		docMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
-	if _, err := b.api.Send(docMsg); err != nil {
-		return err
+	sentDoc, err := b.api.Send(docMsg)
+	if err != nil {
+		return fmt.Errorf("發送原檔案失敗: %w", err)
+	}
+	// Verify the document was actually uploaded
+	if sentDoc.Document == nil {
+		return fmt.Errorf("原檔案上傳失敗：未收到確認")
 	}
 
 	return nil
