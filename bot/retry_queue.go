@@ -73,10 +73,32 @@ func (b *Bot) retryOneFailedGeneration() {
 		return
 	}
 
+	// Delete tasks that have exceeded the maximum retry count
+	if task.RetryCount >= maxRetryCount {
+		log.Printf("任務達到最大重試次數 %d (id=%d)，刪除", maxRetryCount, task.ID)
+		b.db.DeleteFailedGeneration(task.ID)
+		return
+	}
+
 	var payload failedGenerationPayload
 	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil {
 		log.Printf("解析失敗任務 payload 失敗 (id=%d): %v", task.ID, err)
 		b.db.DeleteFailedGeneration(task.ID)
+		return
+	}
+
+	// Normalise legacy source values to the current task type constants
+	source := task.Source
+	switch source {
+	case "", "google":
+		source = taskTypeGoogleImage
+	case "grok":
+		source = taskTypeGrokImage
+	}
+
+	// Handle Grok video retry separately
+	if source == taskTypeGrokVideo {
+		b.retryGrokVideoTask(task, payload)
 		return
 	}
 
@@ -93,13 +115,8 @@ func (b *Bot) retryOneFailedGeneration() {
 
 	var result *gemini.ImageResult
 
-	source := task.Source
-	if source == "" {
-		source = "google"
-	}
-
-	if source == "grok" && b.grokClient.Available() {
-		// Grok retry
+	if source == taskTypeGrokImage && b.grokClient.Available() {
+		// Grok image retry
 		for attempt := 0; attempt < 6; attempt++ {
 			var grokResult *grok.ImageResult
 			if len(downloadedImages) > 0 {
@@ -115,7 +132,7 @@ func (b *Bot) retryOneFailedGeneration() {
 			time.Sleep(time.Second * 2)
 		}
 	} else {
-		// Google retry: try all user services
+		// Google image retry: try all user services
 		allServices, _ := b.resolveAllServiceConfigs(task.UserID)
 		if len(allServices) == 0 {
 			// Fallback to payload service
@@ -180,6 +197,55 @@ func (b *Bot) retryOneFailedGeneration() {
 
 	if err := b.db.DeleteFailedGeneration(task.ID); err != nil {
 		log.Printf("刪除已成功重試任務失敗 (id=%d): %v", task.ID, err)
+	}
+}
+
+// retryGrokVideoTask handles retry for a grok_video type failed task.
+func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failedGenerationPayload) {
+	if !b.grokClient.Available() {
+		b.db.MarkFailedGenerationRetry(task.ID, "Grok not available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var videoResult *grok.VideoResult
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		videoResult, lastErr = b.grokClient.GenerateVideo(ctx, payload.Prompt, "")
+		if lastErr == nil && videoResult != nil && len(videoResult.VideoData) > 0 {
+			break
+		}
+		log.Printf("Grok video retry attempt %d failed (id=%d): %v", attempt+1, task.ID, lastErr)
+		time.Sleep(time.Second * 2)
+	}
+
+	if videoResult == nil || len(videoResult.VideoData) == 0 {
+		errMsg := "unknown error"
+		if lastErr != nil {
+			errMsg = lastErr.Error()
+		}
+		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
+		log.Printf("定時重試影片失敗 (id=%d): %v", task.ID, lastErr)
+		return
+	}
+
+	notice := tgbotapi.NewMessage(task.ChatID, fmt.Sprintf("♻️ 自動重試成功（影片任務 #%d）", task.ID))
+	if task.ReplyToMessageID > 0 {
+		notice.ReplyToMessageID = int(task.ReplyToMessageID)
+	}
+	b.api.Send(notice)
+
+	videoMsg := tgbotapi.NewVideo(task.ChatID, tgbotapi.FileBytes{Name: "retry_generated.mp4", Bytes: videoResult.VideoData})
+	if task.ReplyToMessageID > 0 {
+		videoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
+	}
+	videoMsg.Caption = "🎬 定時重試影片"
+	b.api.Send(videoMsg)
+
+	if err := b.db.DeleteFailedGeneration(task.ID); err != nil {
+		log.Printf("刪除已成功重試影片任務失敗 (id=%d): %v", task.ID, err)
 	}
 }
 
