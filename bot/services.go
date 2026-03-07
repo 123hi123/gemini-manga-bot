@@ -272,14 +272,16 @@ func (b *Bot) cmdServiceDelete(msg *tgbotapi.Message, args []string) {
 	b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已刪除服務 #%d", serviceID)))
 }
 
-func (b *Bot) resolveServiceConfig(userID int64) (gemini.ServiceConfig, string, error) {
-	service, err := b.db.GetDefaultUserService(userID)
+// resolveAllServiceConfigs returns all available service configs for a user (for rotation).
+func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, error) {
+	services, err := b.db.GetAllUserServices(userID)
 	if err != nil {
-		return gemini.ServiceConfig{}, "", err
+		return nil, err
 	}
 
-	if service != nil {
-		return gemini.ServiceConfig{
+	var configs []gemini.ServiceConfig
+	for _, service := range services {
+		configs = append(configs, gemini.ServiceConfig{
 			Type:      service.Type,
 			Name:      service.Name,
 			APIKey:    service.APIKey,
@@ -287,16 +289,30 @@ func (b *Bot) resolveServiceConfig(userID int64) (gemini.ServiceConfig, string, 
 			ProjectID: service.ProjectID,
 			Location:  service.Location,
 			Model:     service.Model,
-		}, fmt.Sprintf("%s (#%d)", service.Name, service.ID), nil
+		})
 	}
 
-	if strings.TrimSpace(b.config.GeminiAPIKey) != "" {
-		return gemini.ServiceConfig{
+	if len(configs) == 0 && strings.TrimSpace(b.config.GeminiAPIKey) != "" {
+		configs = append(configs, gemini.ServiceConfig{
 			Type:    gemini.ServiceTypeStandard,
 			Name:    "env-default",
 			APIKey:  b.config.GeminiAPIKey,
 			BaseURL: b.config.GeminiBaseURL,
-		}, "env-default", nil
+			Model:   b.config.GeminiModel,
+		})
+	}
+
+	return configs, nil
+}
+
+func (b *Bot) resolveServiceConfig(userID int64) (gemini.ServiceConfig, string, error) {
+	services, err := b.resolveAllServiceConfigs(userID)
+	if err != nil {
+		return gemini.ServiceConfig{}, "", err
+	}
+
+	if len(services) > 0 {
+		return services[0], services[0].Name, nil
 	}
 
 	return gemini.ServiceConfig{}, "", fmt.Errorf("尚未設定服務，請先使用 /service add")

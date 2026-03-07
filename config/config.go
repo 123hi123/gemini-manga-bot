@@ -7,8 +7,16 @@ import (
 type Config struct {
 	GeminiAPIKey  string
 	GeminiBaseURL string
+	GeminiModel   string
 	BotToken      string
 	DataDir       string
+
+	// Grok settings
+	GrokAPIKey   string
+	GrokBaseURL  string
+	GrokImgModel  string // image generation model (default: grok-imagine-1.0)
+	GrokEditModel string // image editing model (default: grok-imagine-1.0-edit)
+	GrokVideoModel string // video generation model (default: grok-imagine-1.0-video)
 }
 
 // 預設的翻譯 Prompt
@@ -24,8 +32,15 @@ func LoadConfig() *Config {
 	return &Config{
 		GeminiAPIKey:  getEnv("GEMINI_API_KEY", ""),
 		GeminiBaseURL: getEnv("GEMINI_BASE_URL", ""),
+		GeminiModel:   getEnv("GEMINI_MODEL", ""),
 		BotToken:      getEnv("BOT_TOKEN", ""),
 		DataDir:       getEnv("DATA_DIR", "./data"),
+
+		GrokAPIKey:     getEnv("GROK_API_KEY", ""),
+		GrokBaseURL:    getEnv("GROK_BASE_URL", "http://127.0.0.1:8000"),
+		GrokImgModel:   getEnv("GROK_IMG_MODEL", "grok-imagine-1.0"),
+		GrokEditModel:  getEnv("GROK_EDIT_MODEL", "grok-imagine-1.0-edit"),
+		GrokVideoModel: getEnv("GROK_VIDEO_MODEL", "grok-imagine-1.0-video"),
 	}
 }
 
