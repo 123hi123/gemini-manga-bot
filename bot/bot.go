@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,40 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+// ReactionType represents a Telegram reaction type (emoji or custom_emoji).
+type ReactionType struct {
+	Type  string `json:"type"`
+	Emoji string `json:"emoji,omitempty"`
+}
+
+// MessageReactionUpdated represents a change in reactions on a message.
+// This type is not included in go-telegram-bot-api v5.5.1 and must be defined manually.
+type MessageReactionUpdated struct {
+	Chat        tgbotapi.Chat   `json:"chat"`
+	MessageID   int             `json:"message_id"`
+	User        *tgbotapi.User  `json:"user,omitempty"`
+	Date        int             `json:"date"`
+	OldReaction []ReactionType  `json:"old_reaction"`
+	NewReaction []ReactionType  `json:"new_reaction"`
+}
+
+// extendedUpdate wraps tgbotapi.Update with fields not supported in v5 (e.g. message_reaction).
+type extendedUpdate struct {
+	tgbotapi.Update
+	MessageReaction *MessageReactionUpdated `json:"message_reaction,omitempty"`
+}
+
+// msgPhotoCache caches photo/sticker file IDs by chat+message ID for reaction handling.
+type msgPhotoCache struct {
+	sync.RWMutex
+	entries map[string]*cachedMsgPhoto // key: "chatID:messageID"
+}
+
+type cachedMsgPhoto struct {
+	FileIDs   []string
+	Timestamp time.Time
+}
 
 // mediaGroupCache 用於快取 Media Group 的圖片
 type mediaGroupCache struct {
@@ -47,6 +82,7 @@ type Bot struct {
 	config      *config.Config
 	mediaGroups *mediaGroupCache
 	imageQueues *userImageQueueCache
+	msgPhotos   *msgPhotoCache
 	errorLog    []errorLogEntry
 	errorLogMu  sync.Mutex
 }
@@ -94,6 +130,9 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 		imageQueues: &userImageQueueCache{
 			queues: make(map[string][]queuedImage),
 		},
+		msgPhotos: &msgPhotoCache{
+			entries: make(map[string]*cachedMsgPhoto),
+		},
 	}
 
 	// 啟動清理過期快取的 goroutine
@@ -105,17 +144,44 @@ func NewBot(cfg *config.Config, db *database.Database) (*Bot, error) {
 }
 
 func (b *Bot) Run() {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	u.AllowedUpdates = []string{"message", "callback_query", "message_reaction"}
+	allowedUpdates := []string{"message", "callback_query", "message_reaction"}
+	offset := 0
 
-	updates := b.api.GetUpdatesChan(u)
+	for {
+		params := tgbotapi.Params{}
+		if offset != 0 {
+			params.AddNonZero("offset", offset)
+		}
+		params.AddNonZero("timeout", 60)
+		if err := params.AddInterface("allowed_updates", allowedUpdates); err != nil {
+			log.Printf("添加允許更新類型失敗: %v", err)
+		}
 
-	for update := range updates {
-		if update.Message != nil {
-			go b.handleMessage(update.Message)
-		} else if update.CallbackQuery != nil {
-			go b.handleCallback(update.CallbackQuery)
+		resp, err := b.api.MakeRequest("getUpdates", params)
+		if err != nil {
+			log.Printf("GetUpdates 失敗: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		var updates []extendedUpdate
+		if err := json.Unmarshal(resp.Result, &updates); err != nil {
+			log.Printf("解析更新失敗: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		for _, update := range updates {
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
+			}
+			if update.Message != nil {
+				go b.handleMessage(update.Message)
+			} else if update.CallbackQuery != nil {
+				go b.handleCallback(update.CallbackQuery)
+			} else if update.MessageReaction != nil {
+				go b.handleMessageReaction(update.MessageReaction)
+			}
 		}
 	}
 }
@@ -192,7 +258,53 @@ func (b *Bot) cleanupImageQueues() {
 		if err := b.db.CleanExpiredImageQueue(10 * time.Minute); err != nil {
 			log.Printf("清理過期圖片佇列失敗: %v", err)
 		}
+
+		// Clean expired msgPhotoCache entries
+		b.msgPhotos.RLock()
+		now = time.Now()
+		var expiredKeys []string
+		for key, entry := range b.msgPhotos.entries {
+			if now.Sub(entry.Timestamp) > 10*time.Minute {
+				expiredKeys = append(expiredKeys, key)
+			}
+		}
+		b.msgPhotos.RUnlock()
+		if len(expiredKeys) > 0 {
+			b.msgPhotos.Lock()
+			for _, key := range expiredKeys {
+				delete(b.msgPhotos.entries, key)
+			}
+			b.msgPhotos.Unlock()
+		}
 	}
+}
+
+// cacheMessagePhoto caches the file IDs of a message's photo/sticker for reaction handling.
+func (b *Bot) cacheMessagePhoto(chatID int64, messageID int, fileIDs []string) {
+	if len(fileIDs) == 0 {
+		return
+	}
+	key := fmt.Sprintf("%d:%d", chatID, messageID)
+	b.msgPhotos.Lock()
+	b.msgPhotos.entries[key] = &cachedMsgPhoto{
+		FileIDs:   fileIDs,
+		Timestamp: time.Now(),
+	}
+	b.msgPhotos.Unlock()
+}
+
+// getCachedMessagePhoto returns a copy of the file IDs cached for a chat+message, or nil if not found.
+func (b *Bot) getCachedMessagePhoto(chatID int64, messageID int) []string {
+	key := fmt.Sprintf("%d:%d", chatID, messageID)
+	b.msgPhotos.RLock()
+	entry := b.msgPhotos.entries[key]
+	b.msgPhotos.RUnlock()
+	if entry == nil {
+		return nil
+	}
+	result := make([]string, len(entry.FileIDs))
+	copy(result, entry.FileIDs)
+	return result
 }
 
 // addToImageQueue adds an image to a user's image queue.
@@ -258,6 +370,18 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		log.Printf("[收到圖片] 單張圖片（無 MediaGroupID）, MessageID=%d", msg.MessageID)
 	}
 
+	// 快取圖片/貼圖訊息供表情回應使用
+	if len(msg.Photo) > 0 {
+		photo := msg.Photo[len(msg.Photo)-1]
+		b.cacheMessagePhoto(msg.Chat.ID, msg.MessageID, []string{photo.FileID})
+	} else if msg.Sticker != nil {
+		fileID := msg.Sticker.FileID
+		if msg.Sticker.Thumbnail != nil {
+			fileID = msg.Sticker.Thumbnail.FileID
+		}
+		b.cacheMessagePhoto(msg.Chat.ID, msg.MessageID, []string{fileID})
+	}
+
 	// 處理圖片回覆文字的情況（用圖片回覆一則文字訊息）
 	// 圖片指令在群組和私聊行為相同
 	if len(msg.Photo) > 0 && msg.Caption == "" {
@@ -305,6 +429,91 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		b.handleTextMessage(msg)
 		return
 	}
+}
+
+// handleMessageReaction processes a message_reaction update.
+// When a user adds a reaction to a message containing a photo or sticker,
+// the bot generates images based on that media using the user's default prompt.
+func (b *Bot) handleMessageReaction(reaction *MessageReactionUpdated) {
+	if reaction.User == nil {
+		return // ignore anonymous reactions (e.g. in channels)
+	}
+
+	// Only trigger when a reaction is being added (new reaction list is non-empty)
+	if len(reaction.NewReaction) == 0 {
+		return
+	}
+
+	// Look up the photo/sticker cached for the reacted message
+	fileIDs := b.getCachedMessagePhoto(reaction.Chat.ID, reaction.MessageID)
+	if len(fileIDs) == 0 {
+		log.Printf("[Reaction] 訊息 %d (chat=%d, user=%d) 在快取中找不到圖片/貼圖，忽略", reaction.MessageID, reaction.Chat.ID, reaction.User.ID)
+		return
+	}
+
+	userID := reaction.User.ID
+
+	allServices, _ := b.resolveAllServiceConfigs(userID)
+	gc := b.resolveGrokClient(userID)
+	if len(allServices) == 0 && (gc == nil || !gc.Available()) {
+		return
+	}
+
+	// Get user quality setting
+	quality, _ := b.db.GetUserSettings(userID)
+	if quality == "" {
+		quality = "2K"
+	}
+
+	// Get default prompt
+	prompt := config.DefaultPrompt
+	if defaultPrompt, _ := b.db.GetDefaultPrompt(userID); defaultPrompt != nil {
+		prompt = defaultPrompt.Prompt
+	}
+
+	// Build a synthetic message so existing generation helpers can be reused
+	chatCopy := reaction.Chat
+	syntheticMsg := &tgbotapi.Message{
+		MessageID: reaction.MessageID,
+		Chat:      &chatCopy,
+		From:      reaction.User,
+		Date:      reaction.Date,
+	}
+
+	// Download the media
+	var downloadedImages []gemini.DownloadedImage
+	for _, fileID := range fileIDs {
+		file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
+		if err != nil {
+			log.Printf("[Reaction] 無法取得圖片 %s: %v", fileID, err)
+			continue
+		}
+		data, mimeType, err := b.downloadFile(file.FilePath)
+		if err != nil {
+			log.Printf("[Reaction] 下載圖片失敗 %s: %v", fileID, err)
+			continue
+		}
+		downloadedImages = append(downloadedImages, gemini.DownloadedImage{
+			Data:     data,
+			MimeType: mimeType,
+		})
+	}
+
+	if len(downloadedImages) == 0 {
+		return
+	}
+
+	aspectRatio := resolveAspectRatio("", downloadedImages)
+
+	statusText := fmt.Sprintf("⏳ *處理中（表情回應）...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`", aspectRatio, quality)
+	statusMsg, err := b.sendReplyMessage(syntheticMsg, statusText)
+	if err != nil {
+		log.Printf("[Reaction] 發送狀態訊息失敗: %v", err)
+		return
+	}
+
+	log.Printf("[Reaction] 使用者 %d 對訊息 %d 表情回應，開始生成", userID, reaction.MessageID)
+	b.runAllGenerationTasks(syntheticMsg, reaction.MessageID, prompt, quality, aspectRatio, downloadedImages, fileIDs, allServices, statusMsg.MessageID)
 }
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
