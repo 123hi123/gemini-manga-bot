@@ -33,6 +33,8 @@ type VideoResult struct {
 }
 
 const (
+	ServiceTypeGrok = "grok"
+
 	DefaultBaseURL    = "http://127.0.0.1:8000"
 	DefaultImgModel   = "grok-imagine-1.0"
 	DefaultEditModel  = "grok-imagine-1.0-edit"
