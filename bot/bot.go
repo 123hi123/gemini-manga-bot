@@ -31,12 +31,13 @@ type cachedImage struct {
 
 // errorLogEntry stores a single error event for the /errors command.
 type errorLogEntry struct {
-	Time    time.Time
-	Source  string
-	Message string
+	Time     time.Time
+	Source   string
+	Params   string
+	Response string
 }
 
-const maxErrorLogEntries = 30
+const maxErrorLogEntries = 5
 
 type Bot struct {
 	api         *tgbotapi.BotAPI
@@ -586,13 +587,14 @@ func (b *Bot) cmdQueue(msg *tgbotapi.Message) {
 }
 
 // addErrorLog appends an error entry to the in-memory error log ring buffer.
-func (b *Bot) addErrorLog(source, message string) {
+func (b *Bot) addErrorLog(source, params, response string) {
 	b.errorLogMu.Lock()
 	defer b.errorLogMu.Unlock()
 	b.errorLog = append(b.errorLog, errorLogEntry{
-		Time:    time.Now(),
-		Source:  source,
-		Message: message,
+		Time:     time.Now(),
+		Source:   source,
+		Params:   params,
+		Response: response,
 	})
 	if len(b.errorLog) > maxErrorLogEntries {
 		b.errorLog = b.errorLog[len(b.errorLog)-maxErrorLogEntries:]
@@ -614,12 +616,15 @@ func (b *Bot) cmdErrors(msg *tgbotapi.Message) {
 	var sb strings.Builder
 	sb.WriteString("🔍 *最近錯誤記錄*\n\n")
 	for i, e := range entries {
-		sb.WriteString(fmt.Sprintf("%d\\. `%s` \\[%s\\]\n```\n%s\n```\n\n",
+		sb.WriteString(fmt.Sprintf("%d\\. `%s` \\[%s\\]\n",
 			i+1,
 			escapeMarkdownV2(e.Time.Format("01-02 15:04:05")),
 			escapeMarkdownV2(e.Source),
-			escapeMarkdownV2(truncateError(e.Message)),
 		))
+		if e.Params != "" {
+			sb.WriteString(fmt.Sprintf("*請求參數：*\n```\n%s\n```\n", escapeMarkdownV2(truncateError(e.Params))))
+		}
+		sb.WriteString(fmt.Sprintf("*回應：*\n```\n%s\n```\n\n", escapeMarkdownV2(truncateError(e.Response))))
 	}
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
