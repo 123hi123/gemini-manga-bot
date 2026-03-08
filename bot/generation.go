@@ -112,7 +112,9 @@ func (b *Bot) runGoogleImageTask(
 				break
 			}
 			log.Printf("Google service %s attempt %d failed: %v", svcCfg.Name, attempt+1, lastErr)
-			b.addErrorLog("Google 圖片", fmt.Sprintf("service %s attempt %d: %v", svcCfg.Name, attempt+1, lastErr))
+			b.addErrorLog("Google 圖片",
+				fmt.Sprintf("service=%s, attempt=%d, prompt=%q, quality=%s, aspect_ratio=%s, images=%d", svcCfg.Name, attempt+1, prompt, quality, aspectRatio, len(downloadedImages)),
+				fmt.Sprintf("%v", lastErr))
 			time.Sleep(2 * time.Second)
 		}
 		if result != nil && len(result.ImageData) > 0 {
@@ -184,7 +186,9 @@ func (b *Bot) runGrokImageTask(
 			break
 		}
 		log.Printf("Grok image attempt %d failed: %v", attempt+1, lastErr)
-		b.addErrorLog("Grok 圖片", fmt.Sprintf("attempt %d: %v", attempt+1, lastErr))
+		b.addErrorLog("Grok 圖片",
+			fmt.Sprintf("attempt=%d, prompt=%q, size=1024x1024, images=%d", attempt+1, prompt, len(downloadedImages)),
+			fmt.Sprintf("%v", lastErr))
 		time.Sleep(2 * time.Second)
 	}
 
@@ -227,7 +231,9 @@ func (b *Bot) runGrokVideoTask(
 			break
 		}
 		log.Printf("Grok video attempt %d failed: %v", attempt+1, lastErr)
-		b.addErrorLog("Grok 影片", fmt.Sprintf("attempt %d: %v", attempt+1, lastErr))
+		b.addErrorLog("Grok 影片",
+			fmt.Sprintf("attempt=%d, prompt=%q", attempt+1, prompt),
+			fmt.Sprintf("%v", lastErr))
 		time.Sleep(2 * time.Second)
 	}
 

@@ -132,7 +132,9 @@ func (b *Bot) retryOneFailedGeneration() {
 				break
 			}
 			log.Printf("Grok retry attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
-			b.addErrorLog("Grok 圖片重試", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, err))
+			b.addErrorLog("Grok 圖片重試",
+				fmt.Sprintf("task_id=%d, attempt=%d, prompt=%q, size=1024x1024, images=%d", task.ID, attempt+1, payload.Prompt, len(downloadedImages)),
+				fmt.Sprintf("%v", err))
 			time.Sleep(time.Second * 2)
 		}
 	} else {
@@ -157,7 +159,9 @@ func (b *Bot) retryOneFailedGeneration() {
 					break
 				}
 				log.Printf("Google retry service %s attempt %d failed (id=%d): %v", svcCfg.Name, attempt+1, task.ID, err)
-				b.addErrorLog("Google 圖片重試", fmt.Sprintf("task #%d service %s attempt %d: %v", task.ID, svcCfg.Name, attempt+1, err))
+				b.addErrorLog("Google 圖片重試",
+					fmt.Sprintf("task_id=%d, service=%s, attempt=%d, prompt=%q, quality=%s, aspect_ratio=%s, images=%d", task.ID, svcCfg.Name, attempt+1, payload.Prompt, payload.Quality, aspectRatio, len(downloadedImages)),
+					fmt.Sprintf("%v", err))
 				time.Sleep(time.Second * 2)
 			}
 			if result != nil && len(result.ImageData) > 0 {
@@ -181,7 +185,9 @@ func (b *Bot) retryOneFailedGeneration() {
 					break
 				}
 				log.Printf("Grok retry fallback attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
-				b.addErrorLog("Grok 圖片重試（備援）", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, err))
+				b.addErrorLog("Grok 圖片重試（備援）",
+					fmt.Sprintf("task_id=%d, attempt=%d, prompt=%q, size=1024x1024, images=%d", task.ID, attempt+1, payload.Prompt, len(downloadedImages)),
+					fmt.Sprintf("%v", err))
 				time.Sleep(time.Second * 2)
 			}
 		}
@@ -194,7 +200,9 @@ func (b *Bot) retryOneFailedGeneration() {
 		}
 		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
 		log.Printf("定時重試失敗 (id=%d): %v", task.ID, err)
-		b.addErrorLog("圖片重試最終失敗", fmt.Sprintf("task #%d: %v", task.ID, err))
+		b.addErrorLog("圖片重試最終失敗",
+			fmt.Sprintf("task_id=%d, prompt=%q, quality=%s", task.ID, payload.Prompt, payload.Quality),
+			fmt.Sprintf("%v", err))
 		return
 	}
 
@@ -228,7 +236,9 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 			break
 		}
 		log.Printf("Grok video retry attempt %d failed (id=%d): %v", attempt+1, task.ID, lastErr)
-		b.addErrorLog("Grok 影片重試", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, lastErr))
+		b.addErrorLog("Grok 影片重試",
+			fmt.Sprintf("task_id=%d, attempt=%d, prompt=%q", task.ID, attempt+1, payload.Prompt),
+			fmt.Sprintf("%v", lastErr))
 		time.Sleep(time.Second * 2)
 	}
 
@@ -239,7 +249,9 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 		}
 		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
 		log.Printf("定時重試影片失敗 (id=%d): %v", task.ID, lastErr)
-		b.addErrorLog("Grok 影片重試最終失敗", fmt.Sprintf("task #%d: %v", task.ID, lastErr))
+		b.addErrorLog("Grok 影片重試最終失敗",
+			fmt.Sprintf("task_id=%d, prompt=%q", task.ID, payload.Prompt),
+			fmt.Sprintf("%v", lastErr))
 		return
 	}
 
