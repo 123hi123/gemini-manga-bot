@@ -29,6 +29,15 @@ type cachedImage struct {
 	Timestamp time.Time
 }
 
+// errorLogEntry stores a single error event for the /errors command.
+type errorLogEntry struct {
+	Time    time.Time
+	Source  string
+	Message string
+}
+
+const maxErrorLogEntries = 30
+
 type Bot struct {
 	api         *tgbotapi.BotAPI
 	gemini      *gemini.Client
@@ -37,6 +46,8 @@ type Bot struct {
 	config      *config.Config
 	mediaGroups *mediaGroupCache
 	imageQueues *userImageQueueCache
+	errorLog    []errorLogEntry
+	errorLogMu  sync.Mutex
 }
 
 // userImageQueueCache is an in-memory cache for per-user image queues with expiration.
@@ -317,6 +328,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdService(msg)
 	case "queue":
 		b.cmdQueue(msg)
+	case "errors":
+		b.cmdErrors(msg)
 	}
 }
 
@@ -359,6 +372,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /delete - 刪除已保存的 Prompt
 /service - 服務管理（standard/custom/vertex）
 /queue - 查看待重試任務佇列
+/errors - 查看最近錯誤記錄
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -569,6 +583,60 @@ func (b *Bot) cmdQueue(msg *tgbotapi.Message) {
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 	reply.ParseMode = "Markdown"
 	b.api.Send(reply)
+}
+
+// addErrorLog appends an error entry to the in-memory error log ring buffer.
+func (b *Bot) addErrorLog(source, message string) {
+	b.errorLogMu.Lock()
+	defer b.errorLogMu.Unlock()
+	b.errorLog = append(b.errorLog, errorLogEntry{
+		Time:    time.Now(),
+		Source:  source,
+		Message: message,
+	})
+	if len(b.errorLog) > maxErrorLogEntries {
+		b.errorLog = b.errorLog[len(b.errorLog)-maxErrorLogEntries:]
+	}
+}
+
+func (b *Bot) cmdErrors(msg *tgbotapi.Message) {
+	b.errorLogMu.Lock()
+	entries := make([]errorLogEntry, len(b.errorLog))
+	copy(entries, b.errorLog)
+	b.errorLogMu.Unlock()
+
+	if len(entries) == 0 {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "✅ 目前沒有錯誤記錄")
+		b.api.Send(reply)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🔍 *最近錯誤記錄*\n\n")
+	for i, e := range entries {
+		sb.WriteString(fmt.Sprintf("%d\\. `%s` \\[%s\\]\n```\n%s\n```\n\n",
+			i+1,
+			escapeMarkdownV2(e.Time.Format("01-02 15:04:05")),
+			escapeMarkdownV2(e.Source),
+			escapeMarkdownV2(truncateError(e.Message)),
+		))
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
+	reply.ParseMode = "MarkdownV2"
+	b.api.Send(reply)
+}
+
+// escapeMarkdownV2 escapes special characters for Telegram MarkdownV2.
+func escapeMarkdownV2(s string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+		"(", "\\(", ")", "\\)", "~", "\\~", ">", "\\>",
+		"#", "\\#", "+", "\\+", "-", "\\-", "=", "\\=",
+		"|", "\\|", "{", "\\{", "}", "\\}", ".", "\\.",
+		"!", "\\!", "`", "\\`",
+	)
+	return replacer.Replace(s)
 }
 
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
