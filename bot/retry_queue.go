@@ -114,6 +114,7 @@ func (b *Bot) retryOneFailedGeneration() {
 	aspectRatio := resolveAspectRatio(payload.AspectRatio, downloadedImages)
 
 	var result *gemini.ImageResult
+	resultSource := source // track which provider actually succeeded
 
 	grokClient := b.resolveGrokClient(task.UserID)
 	if source == taskTypeGrokImage && grokClient != nil {
@@ -131,6 +132,7 @@ func (b *Bot) retryOneFailedGeneration() {
 				break
 			}
 			log.Printf("Grok retry attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
+			b.addErrorLog("Grok 圖片重試", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, err))
 			time.Sleep(time.Second * 2)
 		}
 	} else {
@@ -155,9 +157,11 @@ func (b *Bot) retryOneFailedGeneration() {
 					break
 				}
 				log.Printf("Google retry service %s attempt %d failed (id=%d): %v", svcCfg.Name, attempt+1, task.ID, err)
+				b.addErrorLog("Google 圖片重試", fmt.Sprintf("task #%d service %s attempt %d: %v", task.ID, svcCfg.Name, attempt+1, err))
 				time.Sleep(time.Second * 2)
 			}
 			if result != nil && len(result.ImageData) > 0 {
+				resultSource = taskTypeGoogleImage
 				break
 			}
 		}
@@ -173,9 +177,11 @@ func (b *Bot) retryOneFailedGeneration() {
 				}
 				if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
 					result = &gemini.ImageResult{ImageData: grokResult.ImageData}
+					resultSource = taskTypeGrokImage
 					break
 				}
 				log.Printf("Grok retry fallback attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
+				b.addErrorLog("Grok 圖片重試（備援）", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, err))
 				time.Sleep(time.Second * 2)
 			}
 		}
@@ -188,10 +194,11 @@ func (b *Bot) retryOneFailedGeneration() {
 		}
 		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
 		log.Printf("定時重試失敗 (id=%d): %v", task.ID, err)
+		b.addErrorLog("圖片重試最終失敗", fmt.Sprintf("task #%d: %v", task.ID, err))
 		return
 	}
 
-	if err := b.sendRetrySuccessResult(task, payload, result); err != nil {
+	if err := b.sendRetrySuccessResult(task, payload, result, resultSource); err != nil {
 		b.db.MarkFailedGenerationRetry(task.ID, err.Error())
 		log.Printf("定時重試成功但發送失敗 (id=%d): %v", task.ID, err)
 		return
@@ -221,6 +228,7 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 			break
 		}
 		log.Printf("Grok video retry attempt %d failed (id=%d): %v", attempt+1, task.ID, lastErr)
+		b.addErrorLog("Grok 影片重試", fmt.Sprintf("task #%d attempt %d: %v", task.ID, attempt+1, lastErr))
 		time.Sleep(time.Second * 2)
 	}
 
@@ -231,6 +239,7 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 		}
 		b.db.MarkFailedGenerationRetry(task.ID, errMsg)
 		log.Printf("定時重試影片失敗 (id=%d): %v", task.ID, lastErr)
+		b.addErrorLog("Grok 影片重試最終失敗", fmt.Sprintf("task #%d: %v", task.ID, lastErr))
 		return
 	}
 
@@ -278,12 +287,24 @@ func (b *Bot) downloadImagesByFileIDs(fileIDs []string) ([]gemini.DownloadedImag
 	return downloadedImages, nil
 }
 
-func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload failedGenerationPayload, result *gemini.ImageResult) error {
+func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload failedGenerationPayload, result *gemini.ImageResult, resultSource string) error {
 	if result == nil || len(result.ImageData) == 0 {
 		return fmt.Errorf("empty retry result")
 	}
 
-	notice := tgbotapi.NewMessage(task.ChatID, fmt.Sprintf("♻️ 自動重試成功（任務 #%d）", task.ID))
+	// Build a human-readable label for the result source
+	var sourceLabel string
+	switch resultSource {
+	case taskTypeGrokImage:
+		sourceLabel = "🤖 Grok 圖片"
+	case taskTypeGoogleImage:
+		sourceLabel = "🌐 Google 圖片"
+	default:
+		sourceLabel = "🖼 圖片"
+		log.Printf("sendRetrySuccessResult: unexpected resultSource=%q (task #%d)", resultSource, task.ID)
+	}
+
+	notice := tgbotapi.NewMessage(task.ChatID, fmt.Sprintf("♻️ 自動重試成功（任務 #%d）\n結果來源：%s", task.ID, sourceLabel))
 	if task.ReplyToMessageID > 0 {
 		notice.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
@@ -295,6 +316,7 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 	if task.ReplyToMessageID > 0 {
 		photoMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
+	photoMsg.Caption = sourceLabel
 	sentPhoto, err := b.api.Send(photoMsg)
 	if err != nil {
 		return fmt.Errorf("發送預覽圖失敗: %w", err)
@@ -309,7 +331,7 @@ func (b *Bot) sendRetrySuccessResult(task *database.FailedGeneration, payload fa
 		filename = fmt.Sprintf("retry_generated_%s.png", payload.Quality)
 	}
 	docMsg := tgbotapi.NewDocument(task.ChatID, tgbotapi.FileBytes{Name: filename, Bytes: result.ImageData})
-	docMsg.Caption = "📎 定時重試輸出（原畫質）"
+	docMsg.Caption = fmt.Sprintf("📎 定時重試輸出（原畫質）｜%s", sourceLabel)
 	if task.ReplyToMessageID > 0 {
 		docMsg.ReplyToMessageID = int(task.ReplyToMessageID)
 	}
