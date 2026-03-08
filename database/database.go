@@ -181,6 +181,9 @@ func (d *Database) init() error {
 	// Create index on user_image_queue for efficient per-user lookups
 	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_image_queue_user ON user_image_queue(user_id, chat_id)`)
 
+	// Create index on failed_generations for efficient per-user lookups
+	d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_failed_generations_user ON failed_generations(user_id)`)
+
 	return nil
 }
 
@@ -560,6 +563,32 @@ func (d *Database) MarkFailedGenerationRetry(id int64, lastError string) error {
 func (d *Database) DeleteFailedGeneration(id int64) error {
 	_, err := d.db.Exec(`DELETE FROM failed_generations WHERE id = ?`, id)
 	return err
+}
+
+// GetFailedGenerationCounts returns counts of pending retry tasks grouped by source type
+// for a specific user.
+func (d *Database) GetFailedGenerationCounts(userID int64) (map[string]int, error) {
+	rows, err := d.db.Query(`
+		SELECT COALESCE(source, 'google'), COUNT(*)
+		FROM failed_generations
+		WHERE user_id = ?
+		GROUP BY COALESCE(source, 'google')
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var source string
+		var count int
+		if err := rows.Scan(&source, &count); err != nil {
+			return nil, err
+		}
+		counts[source] = count
+	}
+	return counts, nil
 }
 
 func (d *Database) Close() error {

@@ -98,6 +98,58 @@ func TestFailedGenerationQueue(t *testing.T) {
 	}
 }
 
+func TestGetFailedGenerationCounts(t *testing.T) {
+	db, err := NewDatabase(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewDatabase failed: %v", err)
+	}
+	defer db.Close()
+
+	// Add tasks with various source types (including legacy values)
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "google_image"); err != nil {
+		t.Fatalf("AddFailedGeneration google_image failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "google_image"); err != nil {
+		t.Fatalf("AddFailedGeneration google_image 2 failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "grok_image"); err != nil {
+		t.Fatalf("AddFailedGeneration grok_image failed: %v", err)
+	}
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "grok_video"); err != nil {
+		t.Fatalf("AddFailedGeneration grok_video failed: %v", err)
+	}
+	// Legacy source value
+	if err := db.AddFailedGeneration(42, 1, 0, `{"prompt":"p"}`, "", "google"); err != nil {
+		t.Fatalf("AddFailedGeneration legacy google failed: %v", err)
+	}
+	// Different user – should not appear in user 42's counts
+	if err := db.AddFailedGeneration(99, 1, 0, `{"prompt":"p"}`, "", "grok_image"); err != nil {
+		t.Fatalf("AddFailedGeneration other user failed: %v", err)
+	}
+
+	counts, err := db.GetFailedGenerationCounts(42)
+	if err != nil {
+		t.Fatalf("GetFailedGenerationCounts failed: %v", err)
+	}
+
+	if counts["google_image"] != 2 {
+		t.Errorf("expected google_image=2, got %d", counts["google_image"])
+	}
+	if counts["grok_image"] != 1 {
+		t.Errorf("expected grok_image=1, got %d", counts["grok_image"])
+	}
+	if counts["grok_video"] != 1 {
+		t.Errorf("expected grok_video=1, got %d", counts["grok_video"])
+	}
+	if counts["google"] != 1 {
+		t.Errorf("expected legacy google=1, got %d", counts["google"])
+	}
+	// Other user's tasks must not bleed in
+	if counts["grok_image"] != 1 {
+		t.Errorf("other user tasks should not appear, grok_image=%d", counts["grok_image"])
+	}
+}
+
 func TestImageQueue(t *testing.T) {
 	db, err := NewDatabase(t.TempDir())
 	if err != nil {

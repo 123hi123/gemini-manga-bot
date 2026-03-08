@@ -315,6 +315,8 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.cmdDelete(msg)
 	case "service":
 		b.cmdService(msg)
+	case "queue":
+		b.cmdQueue(msg)
 	}
 }
 
@@ -356,6 +358,7 @@ func (b *Bot) cmdStart(msg *tgbotapi.Message) {
 /settings - 設定預設畫質
 /delete - 刪除已保存的 Prompt
 /service - 服務管理（standard/custom/vertex）
+/queue - 查看待重試任務佇列
 /help - 顯示幫助`
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -536,6 +539,35 @@ func (b *Bot) cmdDelete(msg *tgbotapi.Message) {
 	reply := tgbotapi.NewMessage(msg.Chat.ID, "🗑 *選擇要刪除的 Prompt*：")
 	reply.ParseMode = "Markdown"
 	reply.ReplyMarkup = keyboard
+	b.api.Send(reply)
+}
+
+func (b *Bot) cmdQueue(msg *tgbotapi.Message) {
+	counts, err := b.db.GetFailedGenerationCounts(msg.From.ID)
+	if err != nil {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ 取得佇列失敗："+err.Error())
+		b.api.Send(reply)
+		return
+	}
+
+	// Consolidate backward-compatible source values into canonical task types
+	googleCount := counts[taskTypeGoogleImage] + counts["google"]
+	grokImgCount := counts[taskTypeGrokImage] + counts["grok"]
+	grokVideoCount := counts[taskTypeGrokVideo]
+	total := googleCount + grokImgCount + grokVideoCount
+
+	var text string
+	if total == 0 {
+		text = "✅ 目前沒有待重試的任務"
+	} else {
+		text = fmt.Sprintf(
+			"📋 *待重試任務列表*\n\n🌐 Google 圖片：%d\n🤖 Grok 圖片：%d\n🎬 Grok 影片：%d\n\n總計：%d",
+			googleCount, grokImgCount, grokVideoCount, total,
+		)
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
 	b.api.Send(reply)
 }
 
@@ -793,11 +825,6 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	serviceName := "多服務輪替"
-	if len(allServices) == 1 {
-		serviceName = allServices[0].Name
-	}
-
 	// 收集圖片
 	var images []imageData
 
@@ -911,8 +938,8 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆使用者的訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyMessage(msg, statusText)
 	if err != nil {
@@ -953,116 +980,16 @@ func (b *Bot) handleTextMessage(msg *tgbotapi.Message) {
 	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
 	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *同時生成中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images)))
 
-	// 重試邏輯：旋轉所有 Google 服務，每個服務嘗試 6 次
-	var result *gemini.ImageResult
-	ctx := context.Background()
-	var lastErr error
-	googleSuccess := false
-
-	for svcIdx, svcCfg := range allServices {
-		gClient := gemini.NewClientWithService(svcCfg)
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (服務 %d/%d，嘗試 %d/6)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-				svcIdx+1, len(allServices), attempt+1, svcCfg.Name, ratioDisplay, qualityDisplay, len(images)))
-
-			if len(downloadedImages) > 0 {
-				result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, quality, aspectRatio)
-			} else {
-				result, lastErr = gClient.GenerateImageFromText(ctx, prompt, quality, aspectRatio)
-			}
-
-			if lastErr == nil && result != nil && len(result.ImageData) > 0 {
-				googleSuccess = true
-				break
-			}
-
-			log.Printf("Google service %s attempt %d failed: %v", svcCfg.Name, attempt+1, lastErr)
-			time.Sleep(time.Second * 2)
-		}
-		if googleSuccess {
-			break
-		}
+	// 收集圖片 FileID 供重試佇列使用
+	var imageFileIDs []string
+	for _, img := range images {
+		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	// 如果 Google 服務全部失敗，嘗試 Grok
-	if !googleSuccess && b.grokClient.Available() {
-		b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *Google 服務失敗，嘗試 Grok...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-			ratioDisplay, qualityDisplay, len(images)))
-
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *Grok 生成中...* (嘗試 %d/6)\n\n📏 比例：`%s`\n📸 圖片數量：%d",
-				attempt+1, ratioDisplay, len(images)))
-
-			var grokResult *grok.ImageResult
-			if len(downloadedImages) > 0 {
-				grokResult, lastErr = b.grokClient.EditImage(ctx, downloadedImages[0].Data, prompt, "1024x1024")
-			} else {
-				grokResult, lastErr = b.grokClient.GenerateImage(ctx, prompt, "1024x1024")
-			}
-
-			if lastErr == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
-				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
-				break
-			}
-
-			log.Printf("Grok attempt %d failed: %v", attempt+1, lastErr)
-			time.Sleep(time.Second * 2)
-		}
-	}
-
-	if result == nil || len(result.ImageData) == 0 {
-		var imageFileIDs []string
-		for _, img := range images {
-			imageFileIDs = append(imageFileIDs, img.FileID)
-		}
-		source := "google"
-		if b.grokClient.Available() {
-			source = "grok"
-		}
-		var svcCfg gemini.ServiceConfig
-		if len(allServices) > 0 {
-			svcCfg = allServices[0]
-		}
-		b.enqueueFailedGeneration(msg, msg.MessageID, failedGenerationPayload{
-			Prompt:       prompt,
-			Quality:      quality,
-			AspectRatio:  aspectRatio,
-			ImageFileIDs: imageFileIDs,
-			Service:      svcCfg,
-		}, lastErr, source)
-
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（所有服務均已嘗試）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
-			truncateError(lastErr.Error())))
-		return
-	}
-
-	// 刪除處理中訊息
-	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
-
-	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
-	photoMsg.ReplyToMessageID = msg.MessageID
-	if _, err := b.api.Send(photoMsg); err != nil {
-		log.Printf("發送預覽圖失敗: %v", err)
-	}
-
-	// 發送原檔案（不壓縮，完整畫質）— 只有大於 2K 時才額外發送
-	if quality == "4K" || quality == "2K" {
-		docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
-		docMsg.ReplyToMessageID = msg.MessageID
-		docMsg.Caption = "📎 原畫質檔案"
-		if _, err := b.api.Send(docMsg); err != nil {
-			log.Printf("發送原檔案失敗: %v", err)
-		}
-	}
-
-	// 嘗試 Grok 影片生成
-	if b.grokClient.Available() {
-		go b.tryGenerateVideo(msg.Chat.ID, msg.MessageID, prompt, "")
-	}
+	b.runAllGenerationTasks(msg, msg.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
 }
 
 // handleImageReplyText 處理用圖片回覆文字訊息的情況
@@ -1107,11 +1034,6 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
-	}
-
-	serviceName := "多服務輪替"
-	if len(allServices) == 1 {
-		serviceName = allServices[0].Name
 	}
 
 	// 收集圖片（從當前訊息）
@@ -1179,8 +1101,8 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆被引用的文字訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
 	if err != nil {
@@ -1221,103 +1143,16 @@ func (b *Bot) handleImageReplyText(msg *tgbotapi.Message) {
 	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
 	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *同時生成中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
+		ratioDisplay, qualityDisplay, len(images)))
 
-	// 重試邏輯：旋轉所有 Google 服務，每個服務嘗試 6 次
-	var result *gemini.ImageResult
-	ctx := context.Background()
-	var lastErr error
-	googleSuccess := false
-
-	for svcIdx, svcCfg := range allServices {
-		gClient := gemini.NewClientWithService(svcCfg)
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (服務 %d/%d，嘗試 %d/6)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n📸 圖片數量：%d",
-				svcIdx+1, len(allServices), attempt+1, svcCfg.Name, ratioDisplay, qualityDisplay, len(images)))
-
-			result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, quality, aspectRatio)
-			if lastErr == nil && result != nil && len(result.ImageData) > 0 {
-				googleSuccess = true
-				break
-			}
-
-			log.Printf("Google service %s attempt %d failed: %v", svcCfg.Name, attempt+1, lastErr)
-			time.Sleep(time.Second * 2)
-		}
-		if googleSuccess {
-			break
-		}
+	// 收集圖片 FileID 供重試佇列使用
+	var imageFileIDs []string
+	for _, img := range images {
+		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	// 如果 Google 服務全部失敗，嘗試 Grok
-	if !googleSuccess && b.grokClient.Available() && len(downloadedImages) > 0 {
-		b.updateMessageMarkdown(processingMsg, "⏳ *Google 服務失敗，嘗試 Grok 編輯...*")
-
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *Grok 編輯中...* (嘗試 %d/6)", attempt+1))
-
-			grokResult, grokErr := b.grokClient.EditImage(ctx, downloadedImages[0].Data, prompt, "1024x1024")
-			if grokErr == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
-				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
-				lastErr = nil
-				break
-			}
-			lastErr = grokErr
-			log.Printf("Grok edit attempt %d failed: %v", attempt+1, grokErr)
-			time.Sleep(time.Second * 2)
-		}
-	}
-
-	if result == nil || len(result.ImageData) == 0 {
-		var imageFileIDs []string
-		for _, img := range images {
-			imageFileIDs = append(imageFileIDs, img.FileID)
-		}
-		source := "google"
-		if b.grokClient.Available() {
-			source = "grok"
-		}
-		var svcCfg gemini.ServiceConfig
-		if len(allServices) > 0 {
-			svcCfg = allServices[0]
-		}
-		b.enqueueFailedGeneration(msg, msg.ReplyToMessage.MessageID, failedGenerationPayload{
-			Prompt:       prompt,
-			Quality:      quality,
-			AspectRatio:  aspectRatio,
-			ImageFileIDs: imageFileIDs,
-			Service:      svcCfg,
-		}, lastErr, source)
-
-		errMsg := "unknown error"
-		if lastErr != nil {
-			errMsg = lastErr.Error()
-		}
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（所有服務均已嘗試）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
-			truncateError(errMsg)))
-		return
-	}
-
-	// 刪除處理中訊息
-	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
-
-	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
-	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
-	if _, err := b.api.Send(photoMsg); err != nil {
-		log.Printf("發送預覽圖失敗: %v", err)
-	}
-
-	// 發送原檔案（不壓縮，完整畫質）— 只有大於 2K 時才額外發送
-	if quality == "4K" || quality == "2K" {
-		docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
-		docMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
-		docMsg.Caption = "📎 原畫質檔案"
-		if _, err := b.api.Send(docMsg); err != nil {
-			log.Printf("發送原檔案失敗: %v", err)
-		}
-	}
+	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
 }
 
 // handleStickerReplyText 處理用貼圖回覆文字訊息的情況
@@ -1362,11 +1197,6 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 		reply.ReplyToMessageID = msg.MessageID
 		b.api.Send(reply)
 		return
-	}
-
-	serviceName := "多服務輪替"
-	if len(allServices) == 1 {
-		serviceName = allServices[0].Name
 	}
 
 	// 收集貼圖
@@ -1416,8 +1246,8 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 	}
 
 	// 發送處理中訊息（回覆被引用的文字訊息）
-	statusText := fmt.Sprintf("⏳ *處理中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images))
+	statusText := fmt.Sprintf("⏳ *處理中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		ratioDisplay, qualityDisplay, len(images))
 
 	processingMsg, err := b.sendReplyToMessage(msg.ReplyToMessage, statusText)
 	if err != nil {
@@ -1458,103 +1288,16 @@ func (b *Bot) handleStickerReplyText(msg *tgbotapi.Message) {
 	aspectRatio = resolveAspectRatio(params.AspectRatio, downloadedImages)
 	ratioDisplay = ratioDisplayText(params.AspectRatio, aspectRatio, len(downloadedImages))
 
-	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...*\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-		serviceName, ratioDisplay, qualityDisplay, len(images)))
+	b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *同時生成中...*\n\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
+		ratioDisplay, qualityDisplay, len(images)))
 
-	// 重試邏輯：旋轉所有 Google 服務，每個服務嘗試 6 次
-	var result *gemini.ImageResult
-	ctx := context.Background()
-	var lastErr error
-	googleSuccess := false
-
-	for svcIdx, svcCfg := range allServices {
-		gClient := gemini.NewClientWithService(svcCfg)
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *生成圖片中...* (服務 %d/%d，嘗試 %d/6)\n\n🔌 服務：`%s`\n📏 比例：`%s`\n🎨 畫質：`%s`\n🎭 貼圖數量：%d",
-				svcIdx+1, len(allServices), attempt+1, svcCfg.Name, ratioDisplay, qualityDisplay, len(images)))
-
-			result, lastErr = gClient.GenerateImageWithContext(ctx, downloadedImages, prompt, quality, aspectRatio)
-			if lastErr == nil && result != nil && len(result.ImageData) > 0 {
-				googleSuccess = true
-				break
-			}
-
-			log.Printf("Google service %s attempt %d failed: %v", svcCfg.Name, attempt+1, lastErr)
-			time.Sleep(time.Second * 2)
-		}
-		if googleSuccess {
-			break
-		}
+	// 收集圖片 FileID 供重試佇列使用
+	var imageFileIDs []string
+	for _, img := range images {
+		imageFileIDs = append(imageFileIDs, img.FileID)
 	}
 
-	// 如果 Google 服務全部失敗，嘗試 Grok
-	if !googleSuccess && b.grokClient.Available() && len(downloadedImages) > 0 {
-		b.updateMessageMarkdown(processingMsg, "⏳ *Google 服務失敗，嘗試 Grok 編輯...*")
-
-		for attempt := 0; attempt < 6; attempt++ {
-			b.updateMessageMarkdown(processingMsg, fmt.Sprintf("⏳ *Grok 編輯中...* (嘗試 %d/6)", attempt+1))
-
-			grokResult, grokErr := b.grokClient.EditImage(ctx, downloadedImages[0].Data, prompt, "1024x1024")
-			if grokErr == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
-				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
-				lastErr = nil
-				break
-			}
-			lastErr = grokErr
-			log.Printf("Grok edit attempt %d failed: %v", attempt+1, grokErr)
-			time.Sleep(time.Second * 2)
-		}
-	}
-
-	if result == nil || len(result.ImageData) == 0 {
-		var imageFileIDs []string
-		for _, img := range images {
-			imageFileIDs = append(imageFileIDs, img.FileID)
-		}
-		source := "google"
-		if b.grokClient.Available() {
-			source = "grok"
-		}
-		var svcCfg gemini.ServiceConfig
-		if len(allServices) > 0 {
-			svcCfg = allServices[0]
-		}
-		b.enqueueFailedGeneration(msg, msg.ReplyToMessage.MessageID, failedGenerationPayload{
-			Prompt:       prompt,
-			Quality:      quality,
-			AspectRatio:  aspectRatio,
-			ImageFileIDs: imageFileIDs,
-			Service:      svcCfg,
-		}, lastErr, source)
-
-		errMsg := "unknown error"
-		if lastErr != nil {
-			errMsg = lastErr.Error()
-		}
-		b.updateMessageHTML(processingMsg, fmt.Sprintf("❌ <b>處理失敗</b>（所有服務均已嘗試）\n已加入失敗重試佇列，系統每 15 分鐘會隨機挑一筆再試一次。\n\n<blockquote expandable>%s</blockquote>",
-			truncateError(errMsg)))
-		return
-	}
-
-	// 刪除處理中訊息
-	b.api.Request(tgbotapi.NewDeleteMessage(msg.Chat.ID, processingMsg.MessageID))
-
-	// 發送預覽圖（會被 Telegram 壓縮，方便快速查看）
-	photoMsg := tgbotapi.NewPhoto(msg.Chat.ID, tgbotapi.FileBytes{Name: "preview.png", Bytes: result.ImageData})
-	photoMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
-	if _, err := b.api.Send(photoMsg); err != nil {
-		log.Printf("發送預覽圖失敗: %v", err)
-	}
-
-	// 發送原檔案（不壓縮，完整畫質）— 只有大於 2K 時才額外發送
-	if quality == "4K" || quality == "2K" {
-		docMsg := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FileBytes{Name: fmt.Sprintf("generated_%s.png", quality), Bytes: result.ImageData})
-		docMsg.ReplyToMessageID = msg.ReplyToMessage.MessageID
-		docMsg.Caption = "📎 原畫質檔案"
-		if _, err := b.api.Send(docMsg); err != nil {
-			log.Printf("發送原檔案失敗: %v", err)
-		}
-	}
+	b.runAllGenerationTasks(msg, msg.ReplyToMessage.MessageID, prompt, quality, aspectRatio, downloadedImages, imageFileIDs, allServices, processingMsg.MessageID)
 }
 
 type imageData struct {
