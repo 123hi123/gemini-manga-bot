@@ -49,17 +49,17 @@ func (b *Bot) runAllGenerationTasks(
 	}
 
 	// Grok image and video tasks
-	if b.grokClient.Available() {
+	if gc := b.resolveGrokClient(msg.From.ID); gc != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resultCh <- b.runGrokImageTask(msg, replyToMsgID, prompt, downloadedImages, imageFileIDs)
+			resultCh <- b.runGrokImageTask(gc, msg, replyToMsgID, prompt, downloadedImages, imageFileIDs)
 		}()
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			b.runGrokVideoTask(msg, replyToMsgID, prompt)
+			b.runGrokVideoTask(gc, msg, replyToMsgID, prompt)
 		}()
 	}
 
@@ -162,6 +162,7 @@ func (b *Bot) runGoogleImageTask(
 // runGrokImageTask runs Grok image generation (or editing if images are provided).
 // Returns true on success, false on failure (failure is enqueued for retry).
 func (b *Bot) runGrokImageTask(
+	gc *grok.Client,
 	msg *tgbotapi.Message,
 	replyToMsgID int,
 	prompt string,
@@ -174,9 +175,9 @@ func (b *Bot) runGrokImageTask(
 
 	for attempt := 0; attempt < 6; attempt++ {
 		if len(downloadedImages) > 0 {
-			result, lastErr = b.grokClient.EditImage(ctx, downloadedImages[0].Data, prompt, "1024x1024")
+			result, lastErr = gc.EditImage(ctx, downloadedImages[0].Data, prompt, "1024x1024")
 		} else {
-			result, lastErr = b.grokClient.GenerateImage(ctx, prompt, "1024x1024")
+			result, lastErr = gc.GenerateImage(ctx, prompt, "1024x1024")
 		}
 		if lastErr == nil && result != nil && len(result.ImageData) > 0 {
 			break
@@ -207,6 +208,7 @@ func (b *Bot) runGrokImageTask(
 // runGrokVideoTask runs Grok video generation and uploads the result.
 // Failures are silently enqueued for retry (no error message sent to user).
 func (b *Bot) runGrokVideoTask(
+	gc *grok.Client,
 	msg *tgbotapi.Message,
 	replyToMsgID int,
 	prompt string,
@@ -218,7 +220,7 @@ func (b *Bot) runGrokVideoTask(
 	var lastErr error
 
 	for attempt := 0; attempt < 6; attempt++ {
-		result, lastErr = b.grokClient.GenerateVideo(ctx, prompt, "")
+		result, lastErr = gc.GenerateVideo(ctx, prompt, "")
 		if lastErr == nil && result != nil && len(result.VideoData) > 0 {
 			break
 		}

@@ -115,14 +115,16 @@ func (b *Bot) retryOneFailedGeneration() {
 
 	var result *gemini.ImageResult
 
-	if source == taskTypeGrokImage && b.grokClient.Available() {
+	grokClient := b.resolveGrokClient(task.UserID)
+	if source == taskTypeGrokImage && grokClient != nil {
 		// Grok image retry
+		gc := grokClient
 		for attempt := 0; attempt < 6; attempt++ {
 			var grokResult *grok.ImageResult
 			if len(downloadedImages) > 0 {
-				grokResult, err = b.grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
+				grokResult, err = gc.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
 			} else {
-				grokResult, err = b.grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
+				grokResult, err = gc.GenerateImage(ctx, payload.Prompt, "1024x1024")
 			}
 			if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
 				result = &gemini.ImageResult{ImageData: grokResult.ImageData}
@@ -161,13 +163,13 @@ func (b *Bot) retryOneFailedGeneration() {
 		}
 
 		// If Google fails, try Grok as fallback
-		if (result == nil || len(result.ImageData) == 0) && b.grokClient.Available() {
+		if (result == nil || len(result.ImageData) == 0) && grokClient != nil {
 			for attempt := 0; attempt < 6; attempt++ {
 				var grokResult *grok.ImageResult
 				if len(downloadedImages) > 0 {
-					grokResult, err = b.grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
+					grokResult, err = grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
 				} else {
-					grokResult, err = b.grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
+					grokResult, err = grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
 				}
 				if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
 					result = &gemini.ImageResult{ImageData: grokResult.ImageData}
@@ -202,7 +204,8 @@ func (b *Bot) retryOneFailedGeneration() {
 
 // retryGrokVideoTask handles retry for a grok_video type failed task.
 func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failedGenerationPayload) {
-	if !b.grokClient.Available() {
+	gc := b.resolveGrokClient(task.UserID)
+	if gc == nil {
 		b.db.MarkFailedGenerationRetry(task.ID, "Grok not available")
 		return
 	}
@@ -213,7 +216,7 @@ func (b *Bot) retryGrokVideoTask(task *database.FailedGeneration, payload failed
 	var videoResult *grok.VideoResult
 	var lastErr error
 	for attempt := 0; attempt < 6; attempt++ {
-		videoResult, lastErr = b.grokClient.GenerateVideo(ctx, payload.Prompt, "")
+		videoResult, lastErr = gc.GenerateVideo(ctx, payload.Prompt, "")
 		if lastErr == nil && videoResult != nil && len(videoResult.VideoData) > 0 {
 			break
 		}

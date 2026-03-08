@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"tg-bawer/gemini"
+	"tg-bawer/grok"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -38,10 +39,11 @@ func (b *Bot) cmdService(msg *tgbotapi.Message) {
 func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 	helpText := `🔌 *服務管理*
 
-你可以新增三種服務來源：
+你可以新增四種服務來源：
 1) ` + "`standard`" + `：只填 API Key（官方 Gemini）
 2) ` + "`custom`" + `：自訂 Base URL + API Key
 	3) ` + "`vertex`" + `：Vertex（支援只填 API Key 的 express mode）
+4) ` + "`grok`" + `：Grok 影像生成（自訂 Base URL + API Key）
 
 *指令格式：*
 ` + "`/service list`" + `
@@ -52,12 +54,16 @@ func (b *Bot) sendServiceHelp(msg *tgbotapi.Message) {
 ` + "`/service add custom <名稱> <BASE_URL> <API_KEY>`" + `
 	` + "`/service add vertex <名稱> <API_KEY>`" + `  (express mode)
 	` + "`/service add vertex <名稱> <API_KEY> <PROJECT_ID> <LOCATION> [MODEL] [BASE_URL]`" + `  (full mode)
+` + "`/service add grok <名稱> <BASE_URL> <API_KEY>`" + `
+` + "`/service add grok custom <名稱> <BASE_URL> <API_KEY>`" + `
 
 *範例：*
 ` + "`/service add standard my-gemini AIza...`" + `
 ` + "`/service add custom my-proxy https://your-proxy.example.com AIza...`" + `
 	` + "`/service add vertex my-vertex AIza...`" + `
-	` + "`/service add vertex my-vertex AIza... my-project asia-east1 gemini-3-pro-image-preview`"
+	` + "`/service add vertex my-vertex AIza... my-project asia-east1 gemini-3-pro-image-preview`" + `
+` + "`/service add grok my-grok http://your-grok-host:8000 sk-...`" + `
+` + "`/service add grok custom 66 http://48.218.144.171:53768 sk-...`"
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, helpText)
 	reply.ParseMode = "Markdown"
@@ -89,7 +95,7 @@ func (b *Bot) sendServiceList(msg *tgbotapi.Message) {
 			maskSecret(service.APIKey),
 		)
 
-		if service.Type == gemini.ServiceTypeCustom && service.BaseURL != "" {
+		if (service.Type == gemini.ServiceTypeCustom || service.Type == grok.ServiceTypeGrok) && service.BaseURL != "" {
 			detail += " base=" + service.BaseURL
 		}
 
@@ -223,8 +229,50 @@ func (b *Bot) cmdServiceAdd(msg *tgbotapi.Message, args []string) {
 
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已新增 vertex 服務 #%d，並設為預設", id)))
 
+	case "grok":
+		// Formats:
+		// 1) /service add grok <名稱> <BASE_URL> <API_KEY>
+		// 2) /service add grok custom <名稱> <BASE_URL> <API_KEY>
+		var name, baseURL, apiKey string
+		if len(args) >= 3 && strings.ToLower(args[2]) == "custom" {
+			// explicit "custom" sub-type keyword
+			if len(args) < 6 {
+				b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 格式：/service add grok custom <名稱> <BASE_URL> <API_KEY>"))
+				return
+			}
+			name = args[3]
+			baseURL = args[4]
+			apiKey = args[5]
+		} else {
+			if len(args) < 5 {
+				b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 格式：/service add grok <名稱> <BASE_URL> <API_KEY>"))
+				return
+			}
+			name = args[2]
+			baseURL = args[3]
+			apiKey = args[4]
+		}
+
+		id, err := b.db.AddUserService(
+			msg.From.ID,
+			grok.ServiceTypeGrok,
+			name,
+			apiKey,
+			baseURL,
+			"",
+			"",
+			"",
+			true,
+		)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 新增 grok 服務失敗："+err.Error()))
+			return
+		}
+
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已新增 grok 服務 #%d，並設為預設", id)))
+
 	default:
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 不支援的服務類型，請用 standard/custom/vertex"))
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ 不支援的服務類型，請用 standard/custom/vertex/grok"))
 	}
 }
 
@@ -272,7 +320,8 @@ func (b *Bot) cmdServiceDelete(msg *tgbotapi.Message, args []string) {
 	b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ 已刪除服務 #%d", serviceID)))
 }
 
-// resolveAllServiceConfigs returns all available service configs for a user (for rotation).
+// resolveAllServiceConfigs returns all available Gemini/Google service configs for a user (for rotation).
+// Grok services are excluded here; use resolveGrokClient for those.
 func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, error) {
 	services, err := b.db.GetAllUserServices(userID)
 	if err != nil {
@@ -281,6 +330,9 @@ func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, er
 
 	var configs []gemini.ServiceConfig
 	for _, service := range services {
+		if service.Type == grok.ServiceTypeGrok {
+			continue // grok services are handled separately
+		}
 		configs = append(configs, gemini.ServiceConfig{
 			Type:      service.Type,
 			Name:      service.Name,
@@ -303,6 +355,25 @@ func (b *Bot) resolveAllServiceConfigs(userID int64) ([]gemini.ServiceConfig, er
 	}
 
 	return configs, nil
+}
+
+// resolveGrokClient returns a Grok client for the given user.
+// It first checks the user's DB-configured Grok services (default first), then falls back to
+// the environment-variable-configured client. Returns nil if no Grok service is available.
+func (b *Bot) resolveGrokClient(userID int64) *grok.Client {
+	services, err := b.db.GetAllUserServices(userID)
+	if err == nil {
+		for _, s := range services {
+			if s.Type == grok.ServiceTypeGrok {
+				// Empty strings for imgModel/editModel/videoModel use the package defaults.
+				return grok.NewClient(s.APIKey, s.BaseURL, "", "", "")
+			}
+		}
+	}
+	if b.grokClient.Available() {
+		return b.grokClient
+	}
+	return nil
 }
 
 func (b *Bot) resolveServiceConfig(userID int64) (gemini.ServiceConfig, string, error) {
