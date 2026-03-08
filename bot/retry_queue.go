@@ -76,6 +76,15 @@ func (b *Bot) retryOneFailedGeneration() {
 	// Delete tasks that have exceeded the maximum retry count
 	if task.RetryCount >= maxRetryCount {
 		log.Printf("任務達到最大重試次數 %d (id=%d)，刪除", maxRetryCount, task.ID)
+		// Decrement image ref counts for file IDs stored in this task's payload
+		var expiredPayload failedGenerationPayload
+		if jsonErr := json.Unmarshal([]byte(task.Payload), &expiredPayload); jsonErr == nil {
+			for _, fileID := range expiredPayload.ImageFileIDs {
+				if err := b.db.DecrementImageRefCountByFileID(task.UserID, task.ChatID, fileID); err != nil {
+					log.Printf("警告：減少圖片引用計數失敗，可能導致資料庫殘留孤立記錄 (id=%d, file=%s): %v", task.ID, fileID, err)
+				}
+			}
+		}
 		b.db.DeleteFailedGeneration(task.ID)
 		return
 	}
@@ -167,28 +176,6 @@ func (b *Bot) retryOneFailedGeneration() {
 			if result != nil && len(result.ImageData) > 0 {
 				resultSource = taskTypeGoogleImage
 				break
-			}
-		}
-
-		// If Google fails, try Grok as fallback
-		if (result == nil || len(result.ImageData) == 0) && grokClient != nil {
-			for attempt := 0; attempt < 6; attempt++ {
-				var grokResult *grok.ImageResult
-				if len(downloadedImages) > 0 {
-					grokResult, err = grokClient.EditImage(ctx, downloadedImages[0].Data, payload.Prompt, "1024x1024")
-				} else {
-					grokResult, err = grokClient.GenerateImage(ctx, payload.Prompt, "1024x1024")
-				}
-				if err == nil && grokResult != nil && len(grokResult.ImageData) > 0 {
-					result = &gemini.ImageResult{ImageData: grokResult.ImageData}
-					resultSource = taskTypeGrokImage
-					break
-				}
-				log.Printf("Grok retry fallback attempt %d failed (id=%d): %v", attempt+1, task.ID, err)
-				b.addErrorLog("Grok 圖片重試（備援）",
-					fmt.Sprintf("task_id=%d, attempt=%d, prompt=%q, size=1024x1024, images=%d", task.ID, attempt+1, payload.Prompt, len(downloadedImages)),
-					fmt.Sprintf("%v", err))
-				time.Sleep(time.Second * 2)
 			}
 		}
 	}

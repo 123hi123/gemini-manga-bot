@@ -671,6 +671,23 @@ func (d *Database) DecrementImageRefCount(id int64) error {
 	return err
 }
 
+// DecrementImageRefCountByFileID decrements the ref_count for a specific file by user+chat+fileID.
+// Deletes the entry if ref_count reaches zero.
+func (d *Database) DecrementImageRefCountByFileID(userID, chatID int64, fileID string) error {
+	_, err := d.db.Exec(`
+		UPDATE user_image_queue SET ref_count = ref_count - 1
+		WHERE user_id = ? AND chat_id = ? AND file_id = ?
+	`, userID, chatID, fileID)
+	if err != nil {
+		return err
+	}
+	_, err = d.db.Exec(`
+		DELETE FROM user_image_queue
+		WHERE user_id = ? AND chat_id = ? AND file_id = ? AND ref_count <= 0
+	`, userID, chatID, fileID)
+	return err
+}
+
 // GetAllUserServices returns all services for a user (for rotation).
 func (d *Database) GetAllUserServices(userID int64) ([]UserService, error) {
 	return d.GetUserServices(userID)
